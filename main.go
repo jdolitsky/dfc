@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/chainguard-dev/dfc/pkg/dfc"
+	"github.com/chainguard-dev/dfc/pkg/update"
 )
 
 //go:embed mappings.yaml
@@ -45,6 +46,7 @@ func cli() *cobra.Command {
 	var org string
 	var registry string
 	var mappingsFile string
+	var updateFlag bool
 
 	v := "dev"
 	if Version != "" {
@@ -57,10 +59,42 @@ func cli() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "dfc",
 		Example: "dfc <path_to_dockerfile>",
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.MaximumNArgs(1),
 		Version: v,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+
+			// Handle update flag
+			if updateFlag {
+				// Set up update options
+				updateOpts := update.Options{}
+
+				// Set UserAgent if version info is available
+				if Version != "" {
+					updateOpts.UserAgent = "dfc/" + Version
+				}
+
+				// If custom mappings file provided, don't use the update URL
+				if mappingsFile != "" {
+					fmt.Printf("Using local mappings file %s instead of remote URL\n", mappingsFile)
+				} else {
+					// Otherwise use the default mappings URL
+					updateOpts.MappingsURL = update.DefaultMappingsURL
+				}
+
+				if err := update.Update(ctx, updateOpts); err != nil {
+					return fmt.Errorf("failed to update: %w", err)
+				}
+
+				// If no args provided, exit after update
+				if len(args) == 0 {
+					return nil
+				}
+				// Otherwise continue with normal flow
+			} else if len(args) == 0 {
+				// If no update flag and no args, require an argument
+				return fmt.Errorf("requires at least 1 arg(s), only received 0")
+			}
 
 			// Allow for piping into the CLI if first arg is "-"
 			input := cmd.InOrStdin()
@@ -100,8 +134,20 @@ func cli() *cobra.Command {
 				}
 				log.Printf("using custom mappings file: %s", mappingsFile)
 			} else {
-				// Use embedded mappings.yaml
-				mappingsBytes = mappingsYamlBytes
+				// Try to use XDG config mappings file if available
+				xdgMappings, err := update.GetMappingsConfig()
+				if err != nil {
+					return fmt.Errorf("checking XDG config mappings: %w", err)
+				}
+
+				if xdgMappings != nil {
+					log.Printf("using mappings from XDG config directory")
+					mappingsBytes = xdgMappings
+				} else {
+					// Fall back to embedded mappings.yaml
+					log.Printf("using embedded mappings.yaml")
+					mappingsBytes = mappingsYamlBytes
+				}
 			}
 
 			if err := yaml.Unmarshal(mappingsBytes, &mappings); err != nil {
@@ -176,6 +222,7 @@ func cli() *cobra.Command {
 	cmd.Flags().BoolVarP(&inPlace, "in-place", "i", false, "modified the Dockerfile in place (vs. stdout), saving original in a .bak file")
 	cmd.Flags().BoolVarP(&j, "json", "j", false, "print dockerfile as json (before conversion)")
 	cmd.Flags().StringVarP(&mappingsFile, "mappings", "m", "", "path to a custom package mappings YAML file (instead of the default)")
+	cmd.Flags().BoolVar(&updateFlag, "update", false, "check for and apply available updates")
 
 	return cmd
 }
