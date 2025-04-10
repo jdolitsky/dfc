@@ -23,9 +23,7 @@ import (
 
 const (
 	// defaultMappingsURL is the default URL for fetching mappings
-	// TODO: uncomment after PR is merged
-	// defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/mappings.yaml"
-	defaultMappingsURL = "https://raw.githubusercontent.com/jdolitsky/dfc/refs/heads/update-dev/pkg/dfc/builtin-mappings.yaml"
+	defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/pkg/dfc/builtin-mappings.yaml"
 
 	// orgName is the organization name used in XDG paths
 	orgName = "dev.chainguard.dfc"
