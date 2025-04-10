@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gopkg.in/yaml.v3"
 )
 
 // Empty default mappings for tests
@@ -1199,27 +1198,6 @@ func TestFullFileConversion(t *testing.T) {
 		t.Fatalf("Failed to find test files: %v", err)
 	}
 
-	var mappingsBytes []byte
-	mappingsBytes, err = os.ReadFile("../../mappings.yaml")
-	if err != nil {
-		t.Fatalf("Failed to read mappings file: %v", err)
-	}
-
-	var mappingsConfig MappingsConfig
-	if err := yaml.Unmarshal(mappingsBytes, &mappingsConfig); err != nil {
-		t.Fatalf("Failed to unmarshal package mappings: %v", err)
-	}
-
-	// Add default image mappings if none are provided in the file
-	if mappingsConfig.Images == nil {
-		mappingsConfig.Images = map[string]string{
-			"ubuntu": DefaultChainguardBase + ":latest",
-			"debian": DefaultChainguardBase + ":latest",
-			"fedora": DefaultChainguardBase + ":latest",
-			"alpine": DefaultChainguardBase + ":latest",
-		}
-	}
-
 	// Test each file
 	for _, beforeFile := range beforeFiles {
 		name := strings.Split(filepath.Base(beforeFile), ".")[0]
@@ -1244,11 +1222,7 @@ func TestFullFileConversion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to parse Dockerfile: %v", err)
 			}
-			converted, err := orig.Convert(ctx, Options{
-				ExtraMappings: mappingsConfig,
-				Update:        false,
-				NoBuiltIn:     false,
-			})
+			converted, err := orig.Convert(ctx, Options{})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
 			}
