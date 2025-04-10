@@ -208,7 +208,7 @@ func TestGetMappingsConfig(t *testing.T) {
 	}
 
 	// Create mappings file
-	mappingsPath := filepath.Join(configDir, OrgName, "mappings.yaml")
+	mappingsPath := filepath.Join(configDir, orgName, "mappings.yaml")
 	if err := os.MkdirAll(filepath.Dir(mappingsPath), 0755); err != nil {
 		t.Fatalf("Failed to create directories: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestGetMappingsConfig(t *testing.T) {
 // TestInitOCILayout tests the initOCILayout function
 func TestInitOCILayout(t *testing.T) {
 	_, cacheDir, _, _ := setupTestEnvironment(t)
-	testCacheDir := filepath.Join(cacheDir, OrgName, "mappings")
+	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
 
 	if err := initOCILayout(testCacheDir); err != nil {
 		t.Fatalf("initOCILayout() error = %v", err)
@@ -251,7 +251,7 @@ func TestInitOCILayout(t *testing.T) {
 // TestUpdateIndexJSON tests the updateIndexJSON function
 func TestUpdateIndexJSON(t *testing.T) {
 	_, cacheDir, _, _ := setupTestEnvironment(t)
-	testCacheDir := filepath.Join(cacheDir, OrgName, "mappings")
+	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
 
 	// Create the OCI layout
 	if err := initOCILayout(testCacheDir); err != nil {
@@ -404,7 +404,7 @@ func TestUpdateEmptyBody(t *testing.T) {
 
 	// Check if symlink was created
 	configDir := getConfigDir()
-	symlinkPath := filepath.Join(configDir, OrgName, "mappings.yaml")
+	symlinkPath := filepath.Join(configDir, orgName, "mappings.yaml")
 	if _, err := os.Stat(symlinkPath); err != nil {
 		t.Errorf("Symlink not created: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestGetMappingsConfigPath_CreateDirectory(t *testing.T) {
 	_, _, configDir, _ := setupTestEnvironment(t)
 
 	// Delete any existing directory
-	orgDir := filepath.Join(configDir, OrgName)
+	orgDir := filepath.Join(configDir, orgName)
 	if err := os.RemoveAll(orgDir); err != nil {
 		t.Fatalf("Failed to clean org directory: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 	digestString := "sha512:" + hashString
 
 	// Create cache directory
-	testCacheDir := filepath.Join(cacheDir, OrgName, "mappings")
+	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
 	if err := os.MkdirAll(testCacheDir, 0755); err != nil {
 		t.Fatalf("Failed to create cache directory: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 	}
 
 	// Create config directory
-	nestedConfigDir := filepath.Join(configDir, OrgName)
+	nestedConfigDir := filepath.Join(configDir, orgName)
 	if err := os.MkdirAll(nestedConfigDir, 0755); err != nil {
 		t.Fatalf("Failed to create config directory: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Delete any existing cache directory
-	testCacheDir := filepath.Join(cacheDir, OrgName, "mappings")
+	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
 	if err := os.RemoveAll(testCacheDir); err != nil {
 		t.Fatalf("Failed to clean cache directory: %v", err)
 	}

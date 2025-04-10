@@ -86,9 +86,6 @@ func cli() *cobra.Command {
 					updateOpts.UserAgent = "dfc/" + Version
 				}
 
-				// Use the default mappings URL
-				updateOpts.MappingsURL = dfc.DefaultMappingsURL
-
 				if err := dfc.Update(ctx, updateOpts); err != nil {
 					return fmt.Errorf("failed to update: %w", err)
 				}

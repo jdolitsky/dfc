@@ -27,7 +27,7 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 		// Set up update options
 		updateOpts := UpdateOptions{}
 		// Use the default URL
-		updateOpts.MappingsURL = DefaultMappingsURL
+		updateOpts.MappingsURL = defaultMappingsURL
 
 		if err := Update(ctx, updateOpts); err != nil {
 			log.Warn("Failed to update mappings, will try to use existing mappings", "error", err)

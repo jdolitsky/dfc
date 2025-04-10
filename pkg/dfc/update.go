@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	// DefaultMappingsURL is the default URL for fetching mappings
-	DefaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/mappings.yaml"
+	// defaultMappingsURL is the default URL for fetching mappings
+	defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/mappings.yaml"
 
-	// OrgName is the organization name used in XDG paths
-	OrgName = "dev.chainguard.dfc"
+	// orgName is the organization name used in XDG paths
+	orgName = "dev.chainguard.dfc"
 )
 
 // UpdateOptions configures the update behavior
@@ -61,7 +61,7 @@ type ociDescriptor struct {
 // getCacheDir returns the XDG cache directory for dfc using the xdg library
 func getCacheDir() string {
 	// Use xdg library to get the cache directory path
-	return filepath.Join(xdg.CacheHome, OrgName, "mappings")
+	return filepath.Join(xdg.CacheHome, orgName, "mappings")
 }
 
 // getConfigDir returns the XDG config directory for dfc using the xdg library
@@ -73,7 +73,7 @@ func getConfigDir() string {
 // GetMappingsConfigPath returns the path to the mappings.yaml file in XDG_CONFIG_HOME
 func getMappingsConfigPath() (string, error) {
 	// Use xdg library's ConfigFile to get the proper location
-	mappingsPath, err := xdg.ConfigFile(filepath.Join(OrgName, "mappings.yaml"))
+	mappingsPath, err := xdg.ConfigFile(filepath.Join(orgName, "mappings.yaml"))
 	if err != nil {
 		return "", fmt.Errorf("getting mappings config path: %w", err)
 	}
@@ -219,7 +219,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 	// Set default MappingsURL if not provided
 	mappingsURL := opts.MappingsURL
 	if mappingsURL == "" {
-		mappingsURL = DefaultMappingsURL
+		mappingsURL = defaultMappingsURL
 	}
 
 	// Create a new HTTP request
@@ -236,6 +236,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 	req.Header.Set("User-Agent", userAgent)
 
 	// Send the request
+	log.Debug("Fetching mappings", "url", mappingsURL)
 	client := http.DefaultClient
 	resp, err := client.Do(req)
 	if err != nil {
@@ -283,7 +284,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		configDir := getConfigDir()
 
 		// Ensure the nested config directory exists
-		nestedConfigDir := filepath.Join(configDir, OrgName)
+		nestedConfigDir := filepath.Join(configDir, orgName)
 		if err := os.MkdirAll(nestedConfigDir, 0755); err != nil {
 			return fmt.Errorf("creating nested config directory: %w", err)
 		}
@@ -325,7 +326,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		configDir := getConfigDir()
 
 		// Ensure the nested config directory exists
-		nestedConfigDir := filepath.Join(configDir, OrgName)
+		nestedConfigDir := filepath.Join(configDir, orgName)
 		if err := os.MkdirAll(nestedConfigDir, 0755); err != nil {
 			return fmt.Errorf("creating nested config directory: %w", err)
 		}
