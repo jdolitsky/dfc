@@ -64,63 +64,6 @@ mv ./Dockerfile.bak ./Dockerfile # revert
 Note: the `Dockerfile` and `Dockerfile.chainguard` in the root of this repo are not actually for building `dfc`, they
 are symlinks to files in the [`testdata/`](./testdata/) folder so users can run the commands in this README.
 
-## Configuration
-
-### Chainguard org (cgr.dev namespace)
-
-By default, FROM lines that have been mapped to Chainguard images will use "ORG" as a placeholder under `cgr.dev`:
-
-```Dockerfile
-FROM cgr.dev/ORG/<image>
-```
-
-To configure your `cgr.dev` namespace use the `--org` flag:
-
-```
-dfc --org="example.com" ./Dockerfile
-```
-
-Resulting in:
-
-```Dockerfile
-FROM cgr.dev/example.com/<image>
-```
-
-If mistakenly ran `dfc` with no configuration options and just want to replace the ORG
-in the converted file, you can run something like this:
-
-```sh
-sed "s|/ORG/|/example.com/|" ./Dockerfile > dfc.tmp && mv dfc.tmp ./Dockerfile
-```
-
-### Alternate registry
-
-To use an alternative registry domain and root namespace, use the `--registry` flag:
-
-```
-dfc --registry="r.example.com/cgr-mirror" ./Dockerfile
-```
-
-Resulting in:
-
-```Dockerfile
-FROM r.example.com/cgr-mirror/<image>
-```
-
-Note: the `--registry` flag takes precedence over the `--org` flag.
-
-### Custom mappings file
-
-If you need to use a modified version of the default, embedded mappings
-file [`mappings.yaml`](./mappings.yaml), use the `--mappings` flag:
-
-```sh
-dfc --mappings="./custom-mappings.yaml" ./Dockerfile
-```
-
-Want to submit an update to the default [`mappings.yaml`](./mappings.yaml)?
-Please [open a GitHub pull request](https://github.com/chainguard-dev/dfc/compare).
-
 ## Examples
 
 For complete before and after examples, see the [`testdata/`](./testdata/) folder.
@@ -179,6 +122,126 @@ The following platforms are recognized:
 | Fedora/RedHat/UBI ("fedora") | `yum` / `dnf` / `microdnf` |
 
 
+## Configuration
+
+### Chainguard org (cgr.dev namespace)
+
+By default, FROM lines that have been mapped to Chainguard images will use "ORG" as a placeholder under `cgr.dev`:
+
+```Dockerfile
+FROM cgr.dev/ORG/<image>
+```
+
+To configure your `cgr.dev` namespace use the `--org` flag:
+
+```
+dfc --org="example.com" ./Dockerfile
+```
+
+Resulting in:
+
+```Dockerfile
+FROM cgr.dev/example.com/<image>
+```
+
+If mistakenly ran `dfc` with no configuration options and just want to replace the ORG
+in the converted file, you can run something like this:
+
+```sh
+sed "s|/ORG/|/example.com/|" ./Dockerfile > dfc.tmp && mv dfc.tmp ./Dockerfile
+```
+
+### Alternate registry
+
+To use an alternative registry domain and root namespace, use the `--registry` flag:
+
+```
+dfc --registry="r.example.com/cgr-mirror" ./Dockerfile
+```
+
+Resulting in:
+
+```Dockerfile
+FROM r.example.com/cgr-mirror/<image>
+```
+
+Note: the `--registry` flag takes precedence over the `--org` flag.
+
+### Custom mappings file
+
+If you need to supply extra image or package mappings, use the `--mappings` flag:
+
+```sh
+dfc --mappings="./custom-mappings.yaml" ./Dockerfile
+```
+
+By default, custom mappings specified with `--mappings` will overlay the built-in mappings found in [`pkg/dfc/builtin-mappings.yaml`](./pkg/dfc/builtin-mappings.yaml). If you wish to bypass the built-in mappings entirely and only use your custom mappings, use the `--no-builtin` flag:
+
+```sh
+dfc --mappings="./custom-mappings.yaml" --no-builtin ./Dockerfile
+```
+
+Example of a custom mappings file with tag-specific mappings:
+
+```yaml
+images:
+  # Base image mapping without tag
+  "node": "customnode"
+  
+  # Specific version mapping with tag
+  "node:18": "r.example.com/custom-node:18.2-dev"
+  
+  # Distribution-specific mapping
+  "python:3.9-slim": "r.example.com/alternate-python:3.9-alpine"
+  
+  # Direct replacement with fully qualified name
+  "ubuntu:22.04": "cgr.dev/chainguard/wolfi-base:latest"
+
+packages:
+  # Package mappings can be defined per distro
+  debian:
+    nano: ["vim"]
+  fedora:
+    httpd: ["nginx"]
+```
+
+In this example:
+- `FROM node` would convert to `FROM cgr.dev/ORG/customnode:latest-dev` (if stage has RUN commands)
+- `FROM node:18` would convert to `FROM r.example.com/custom-node:18.2-dev`
+- `FROM python:3.9-slim` would convert to `FROM r.example.com/alternate-python:3.9-alpine`
+- `FROM ubuntu:22.04` would convert to `FROM cgr.dev/chainguard/wolfi-base:latest`
+
+### Updating Built-in Mappings
+
+The `--update` flag is used to update the built-in mappings in a local cache from the latest version available in the repository:
+
+```sh
+dfc --update
+```
+
+You can use this flag as a standalone command to update mappings without performing any conversion, or combine it with a conversion command to ensure you're using the latest mappings:
+
+```sh
+dfc --update ./Dockerfile
+```
+
+When combined with a conversion command, the update check is performed prior to running the conversion, ensuring your conversions use the most up-to-date mappings available.
+
+### Submitting New Built-in Mappings
+
+If you'd like to request new mappings to be added to the built-in mappings file, please [open a GitHub issue](https://github.com/chainguard-dev/dfc/issues/new?template=BLANK_ISSUE).
+
+Note that the `builtin-mappings.yaml` file is generated via internal automation and cannot be edited directly. Your issue will be reviewed by the maintainers, and if approved, the mappings will be added to the internal automation that generates the built-in mappings.
+
+### Configuration Files and Cache
+
+`dfc` follows the XDG specification for configuration and cache directories:
+
+- **XDG_CONFIG_HOME**: Stores configuration files, including a symlink to `builtin-mappings.yaml`. By default, this is `~/.config/dev.chainguard.dfc/` (on macOS: `~/Library/Application\ Support/dev.chainguard.dfc/`).
+- **XDG_CACHE_HOME**: Stores cached data following the [OCI layout specification]((https://github.com/opencontainers/image-spec/blob/main/image-layout.md). By default, this is `~/.cache/dev.chainguard.dfc/` (on macOS: `~/Library/Caches/dev.chainguard.dfc/`).
+
+Note: `dfc` does not make any network requests unless the `--update` flag is provided. However, `dfc` will perform a syscall to check for the existence of the `builtin-mappings.yaml` file (symlink) in the XDG_CONFIG directory.
+
 ## How it works
 
 ### `FROM` line modifications
@@ -229,11 +292,15 @@ When converting Dockerfiles, `dfc` applies the following logic to determine whic
 
 ### Base Image Mapping
 - Image mappings are defined in the `mappings.yaml` file under the `images` section
-- Each mapping defines a source image name (e.g., `ubuntu`, `nodejs`) and its Chainguard equivalent
+- Each mapping can be defined as:
+  - A simple image name (e.g., `node`, `python`) without a tag
+  - A fully qualified image reference with tag (e.g., `node:18.2`, `python:3.9-slim`)
 - Glob matching is supported using the asterisk (*) wildcard (e.g., `nodejs*` matches both `nodejs` and `nodejs20-debian12`)
+- Direct matches on image references including tags take precedence over base image name matches
 - If a mapping includes a tag (e.g., `chainguard-base:latest`), that tag is always used
 - If no tag is specified in the mapping (e.g., `node`), tag selection follows the standard tag mapping rules
 - If no mapping is found for a base image, the original name is preserved and tag mapping rules apply
+- Docker Hub images with full domain references (e.g., `docker.io/library/node`, `index.docker.io/library/node`) are normalized before mapping by removing the domain and `library/` prefix, which allows them to match against the simple image name entries in mappings.yaml
 
 ### Tag Mapping
 The tag conversion follows these rules:
@@ -336,6 +403,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/chainguard-dev/dfc/pkg/dfc"
@@ -362,6 +430,10 @@ func main() {
 	// Convert
 	converted, err := dockerfile.Convert(ctx, dfc.Options{
 		Organization: org,
+		// Registry: "r.example.com/cgr-mirror", // Optional: registry override
+		// Update:   true,                      // Optional: update mappings before conversion
+		// ExtraMappings: myCustomMappings,     // Optional: overlay mappings on top of builtin
+		// NoBuiltIn: true,                     // Optional: skip built-in mappings
 	})
 	if err != nil {
 		log.Fatalf("dockerfile.Convert(): %v", err)
@@ -371,6 +443,118 @@ func main() {
 	fmt.Println(converted)
 }
 ```
+
+### Custom Base Image Conversion
+
+You can customize how base images are converted by providing a `FromLineConverter` function. This example shows how to handle internal repository images differently while using the default Chainguard conversion for other images:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"path/filepath"
+	"strings"
+
+	"github.com/chainguard-dev/dfc/pkg/dfc"
+)
+
+func main() {
+	ctx := context.Background()
+	
+	// Sample Dockerfile with multiple FROM lines
+	raw := []byte(strings.TrimSpace(`
+		FROM node:14
+		RUN npm install
+		
+		FROM internal-repo.example.com/python:3.9
+		COPY --from=0 /app/node_modules /app/node_modules
+		RUN pip install -r requirements.txt
+	`))
+
+	// Parse the Dockerfile
+	dockerfile, err := dfc.ParseDockerfile(ctx, raw)
+	if err != nil {
+		log.Fatalf("ParseDockerfile(): %v", err)
+	}
+
+	// Define a custom converter that:
+	// 1. For internal repository images, adds basename as a suffix to the tag
+	// 2. For all other images, uses the default Chainguard conversion
+	customConverter := func(from *dfc.FromDetails, converted string, stageHasRuns bool) (string, error) {
+		// Check if this is an internal repository image
+		if strings.Contains(from.Orig, "internal-repo") {
+			// Extract the image basename
+			basename := filepath.Base(from.Base)
+			
+			// Extract tag part if present
+			tagPart := ""
+			if from.Tag != "" {
+				tagPart = from.Tag
+			} else {
+				tagPart = "latest"
+			}
+			
+			// For internal images, we maintain the internal repo but add our org
+			// and image basename as a suffix to the tag
+			suffix := fmt.Sprintf("%s-my-org-%s", tagPart, basename)
+			
+			// Add -dev suffix if the stage has RUN commands
+			if stageHasRuns {
+				suffix += "-dev"
+			}
+			
+			return fmt.Sprintf("internal-repo.example.com/%s:%s", 
+				from.Base, suffix), nil
+		}
+		
+		// For all other images, use the default Chainguard conversion
+		return converted, nil
+	}
+
+	// Convert with custom image conversion
+	converted, err := dockerfile.Convert(ctx, dfc.Options{
+		Organization:      "my-org",
+		FromLineConverter: customConverter,
+	})
+	if err != nil {
+		log.Fatalf("dockerfile.Convert(): %v", err)
+	}
+
+	// Print the results
+	fmt.Println("Original Dockerfile:")
+	fmt.Println(string(raw))
+	fmt.Println("\nConverted Dockerfile:")
+	fmt.Println(converted)
+}
+```
+
+Example output:
+```
+Original Dockerfile:
+FROM node:14
+RUN npm install
+
+FROM internal-repo.example.com/python:3.9
+COPY --from=0 /app/node_modules /app/node_modules
+RUN pip install -r requirements.txt
+
+Converted Dockerfile:
+FROM cgr.dev/my-org/node:14-dev
+USER root
+RUN apk add --no-cache npm
+RUN npm install
+
+FROM internal-repo.example.com/python:3.9-my-org-python-dev
+USER root
+COPY --from=0 /app/node_modules /app/node_modules
+RUN apk add --no-cache pip
+RUN pip install -r requirements.txt
+```
+
+This approach gives you full control over image reference conversion while preserving DFC's package manager and command conversion capabilities.
 
 ## Limitations
 

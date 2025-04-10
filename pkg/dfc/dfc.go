@@ -115,6 +115,7 @@ type FromDetails struct {
 	Parent      int    `json:"parent,omitempty"`
 	BaseDynamic bool   `json:"baseDynamic,omitempty"`
 	TagDynamic  bool   `json:"tagDynamic,omitempty"`
+	Orig        string `json:"orig,omitempty"` // Original full image reference
 }
 
 // RunDetails holds details about a RUN directive
@@ -209,6 +210,9 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 			// Capture space + AS + space to get exact length
 			asKeywordWithSpaces := " " + KeywordAs + " "
 
+			// Save the original image reference before any parsing
+			var origImageRef string
+
 			// Split by case-insensitive " AS " pattern
 			asParts := strings.Split(strings.ToUpper(fromPart), asKeywordWithSpaces)
 			if len(asParts) > 1 {
@@ -219,15 +223,24 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 					basePart := strings.TrimSpace(fromPart[:asIndex])
 					aliasPart := strings.TrimSpace(fromPart[asIndex+len(asKeywordWithSpaces):])
 					fromPart = basePart
+					origImageRef = basePart // Capture only the image reference part
 					alias = aliasPart
 
 					// Store this alias for parent references
 					stageAliases[strings.ToLower(alias)] = currentStage
 				}
+			} else {
+				origImageRef = fromPart
 			}
 
 			// Parse the image reference
 			var base, tag, digest string
+
+			// Store the original image reference before we split it up
+			if origImageRef != "" {
+				// We need to preserve the original reference exactly as is
+				// origImageRef already has the right value at this point
+			}
 
 			// Check for digest
 			if digestParts := strings.Split(fromPart, "@"); len(digestParts) > 1 {
@@ -258,6 +271,7 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 				Parent:      parent,
 				BaseDynamic: strings.Contains(base, "$"),
 				TagDynamic:  strings.Contains(tag, "$"),
+				Orig:        origImageRef,
 			}
 		}
 
@@ -381,21 +395,51 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 	return dockerfile, nil
 }
 
+// PackageMap maps distros to package mappings
+type PackageMap map[Distro]map[string][]string
+
+// FromLineConverter is a function type for custom image reference conversion in FROM directives.
+// It takes a FromDetails struct containing information about the original image and the
+// string that would be produced by the default Chainguard conversion, and allows for customizing
+// the final image reference.
+// If an error is returned, the original image reference will be used instead.
+// The converter is only responsible for returning the image reference part (e.g., "cgr.dev/chainguard/node:latest"),
+// not the full FROM line with directives like "AS" - those will be handled by the calling code.
+//
+// Example usage of a custom converter:
+//
+//	myConverter := func(from *FromDetails, converted string, stageHasRuns bool) (string, error) {
+//	    // For most images, just use the default Chainguard conversion
+//	    if from.Base != "python" {
+//	        return converted, nil
+//	    }
+//
+//	    // Special handling for python images
+//	    return "myregistry.example.com/python:" + from.Tag, nil
+//	}
+//
+//	// Use the custom converter with DFC
+//	dockerFile.Convert(ctx, dfc.Options{
+//	    Organization: "myorg",
+//	    FromLineConverter: myConverter,
+//	})
+type FromLineConverter func(from *FromDetails, converted string, stageHasRuns bool) (string, error)
+
 // Options defines the configuration options for the conversion
 type Options struct {
-	Organization string
-	Registry     string
-	Mappings     MappingsConfig
+	Organization      string
+	Registry          string
+	ExtraMappings     MappingsConfig
+	Update            bool              // When true, update cached mappings before conversion
+	NoBuiltIn         bool              // When true, don't use built-in mappings, only ExtraMappings
+	FromLineConverter FromLineConverter // Optional custom converter for FROM lines
 }
 
-// MappingsConfig represents the structure of mappings.yaml
+// MappingsConfig represents the structure of builtin-mappings.yaml
 type MappingsConfig struct {
 	Images   map[string]string `yaml:"images"`
 	Packages PackageMap        `yaml:"packages"`
 }
-
-// PackageMap maps distros to package mappings
-type PackageMap map[Distro]map[string][]string
 
 // parseImageReference extracts base and tag from an image reference
 func parseImageReference(imageRef string) (base, tag string) {
@@ -410,7 +454,38 @@ func parseImageReference(imageRef string) (base, tag string) {
 }
 
 // Convert applies the conversion to the Dockerfile and returns a new converted Dockerfile
-func (d *Dockerfile) Convert(_ context.Context, opts Options) (*Dockerfile, error) {
+func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, error) {
+	// Initialize mappings
+	var mappings MappingsConfig
+
+	// Handle mappings based on options
+	if !opts.NoBuiltIn {
+		// Load the default mappings (unless NoBuiltIn is true)
+		defaultMappings, err := defaultGetDefaultMappings(ctx, opts.Update)
+		if err != nil {
+			return nil, fmt.Errorf("loading default mappings: %w", err)
+		}
+
+		// Use default mappings
+		mappings = defaultMappings
+
+		// Merge with the extra mappings if provided
+		if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
+			mappings = MergeMappings(defaultMappings, opts.ExtraMappings)
+		}
+	} else {
+		// NoBuiltIn is true, use only ExtraMappings if provided
+		// Otherwise, use empty mappings
+		mappings = opts.ExtraMappings
+		// Initialize empty maps if they don't exist
+		if mappings.Images == nil {
+			mappings.Images = make(map[string]string)
+		}
+		if mappings.Packages == nil {
+			mappings.Packages = make(PackageMap)
+		}
+	}
+
 	// Create a new Dockerfile for the converted content
 	converted := &Dockerfile{
 		Lines: make([]*DockerfileLine, len(d.Lines)),
@@ -443,20 +518,34 @@ func (d *Dockerfile) Convert(_ context.Context, opts Options) (*Dockerfile, erro
 
 			// Apply FROM line conversion only for non-dynamic bases
 			if shouldConvertFromLine(line.From) {
-				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, opts)
+				// Use the merged mappings for conversion
+				optsWithMappings := Options{
+					Organization:      opts.Organization,
+					Registry:          opts.Registry,
+					ExtraMappings:     mappings,
+					FromLineConverter: opts.FromLineConverter,
+				}
+				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, optsWithMappings)
 			}
 		}
 
 		// Handle ARG lines that are used as base images
 		if line.Arg != nil && line.Arg.UsedAsBase && line.Arg.DefaultValue != "" {
-			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, opts)
+			// Use the merged mappings for conversion
+			optsWithMappings := Options{
+				Organization:      opts.Organization,
+				Registry:          opts.Registry,
+				ExtraMappings:     mappings,
+				FromLineConverter: opts.FromLineConverter,
+			}
+			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, optsWithMappings)
 			newLine.Converted = argLine
 			newLine.Arg = argDetails
 		}
 
 		// Process RUN commands
 		if line.Run != nil && line.Run.Shell != nil && line.Run.Shell.Before != nil {
-			processRunLine(newLine, line, stagePackages, opts.Mappings.Packages)
+			processRunLine(newLine, line, stagePackages, mappings.Packages)
 		}
 
 		// Add the converted line to the result
@@ -521,11 +610,13 @@ func copyFromDetails(from *FromDetails) *FromDetails {
 		Parent:      from.Parent,
 		BaseDynamic: from.BaseDynamic,
 		TagDynamic:  from.TagDynamic,
+		Orig:        from.Orig,
 	}
 }
 
 // convertFromLine handles converting a FROM line
 func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int]bool, opts Options) string {
+	// First, always do the default Chainguard conversion
 	// Determine if we need the -dev suffix
 	needsDevSuffix := stagesWithRunCommands[stage]
 
@@ -533,116 +624,330 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	base := from.Base
 	tag := from.Tag
 
-	// Handle the basename
-	baseFilename := filepath.Base(base)
-
-	// Get the appropriate Chainguard image name using mappings
-	targetImage := baseFilename
-	var convertedTag string
-
-	// Check for exact match first
-	if mappedImage, ok := opts.Mappings.Images[baseFilename]; ok {
-		// Check if the mapped image includes a tag
-		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-			targetImage = parts[0]
-			convertedTag = parts[1]
+	// First check for exact match on the full image reference (with tag) if tag is present
+	var mappedImage string
+	if tag != "" {
+		// Try exact match first
+		fullImageRef := base + ":" + tag
+		if img, ok := opts.ExtraMappings.Images[fullImageRef]; ok {
+			mappedImage = img
 		} else {
-			targetImage = mappedImage
-		}
-	} else {
-		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.Mappings.Images {
-			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
-				if strings.HasPrefix(baseFilename, prefix) {
-					// Found a match with a glob pattern
-					if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-						targetImage = parts[0]
-						convertedTag = parts[1]
-					} else {
-						targetImage = mappedImage
+			// Try normalized variants for Docker Hub images with tags
+
+			// First try normalizing the base (removes Docker Hub prefixes)
+			normalizedBase := normalizeImageName(base)
+			if normalizedBase != base {
+				normalizedRef := normalizedBase + ":" + tag
+				if img, ok := opts.ExtraMappings.Images[normalizedRef]; ok {
+					mappedImage = img
+				}
+			}
+
+			// If still no match, try with Docker Hub variants
+			if mappedImage == "" {
+				// Generate variants like "docker.io/library/node:23.9"
+				baseVariants := generateDockerHubVariants(base)
+				for _, variant := range baseVariants {
+					variantWithTag := variant + ":" + tag
+					if img, ok := opts.ExtraMappings.Images[variantWithTag]; ok {
+						mappedImage = img
+						break
 					}
-					break
+				}
+			}
+
+			// If still no match, try removing 'library/' prefix if present
+			if mappedImage == "" && strings.HasPrefix(normalizedBase, "library/") {
+				simpleBase := strings.TrimPrefix(normalizedBase, "library/")
+				simpleRef := simpleBase + ":" + tag
+				if img, ok := opts.ExtraMappings.Images[simpleRef]; ok {
+					mappedImage = img
 				}
 			}
 		}
 	}
 
-	// If targetTag is not specified in mapping, calculate it using the existing logic
-	if convertedTag == "" {
-		convertedTag = calculateConvertedTag(targetImage, tag, from.TagDynamic, needsDevSuffix)
+	// If no match on full reference, continue with the existing logic
+	if mappedImage == "" {
+		// Handle the basename
+		baseFilename := filepath.Base(base)
+
+		// Get the appropriate Chainguard image name using mappings
+		targetImage := baseFilename
+		var convertedTag string
+
+		// Check for exact match first, in specific order
+		// For example, if the mapping is just node, it should match all of the following:
+		// FROM registry-1.docker.io/library/node
+		// FROM docker.io/node
+		// FROM docker.io/library/node
+		// FROM index.docker.io/node
+		// FROM index.docker.io/library/node
+		//
+		// If the mapping is someorg/somerepo, it should match all of the following:
+		// FROM registry-1.docker.io/someorg/somerepo
+		// FROM docker.io/someorg/somerepo
+		// FROM index.docker.io/someorg/somerepo
+
+		// Try exact match first
+		if img, ok := opts.ExtraMappings.Images[base]; ok {
+			mappedImage = img
+		} else if img, ok := opts.ExtraMappings.Images[baseFilename]; ok {
+			mappedImage = img
+		} else {
+			// Generate all possible variants for the base image
+			baseVariants := generateDockerHubVariants(base)
+
+			// Check if any variant matches a key in the mappings
+			for _, variant := range baseVariants {
+				if img, ok := opts.ExtraMappings.Images[variant]; ok {
+					mappedImage = img
+					break
+				}
+			}
+
+			// If still no match, try to normalize the base and check against simple keys
+			if mappedImage == "" {
+				normalizedBase := normalizeImageName(base)
+
+				// Check if the normalized base matches any key
+				if img, ok := opts.ExtraMappings.Images[normalizedBase]; ok {
+					mappedImage = img
+				} else {
+					// Try removing library/ prefix if it exists
+					if strings.HasPrefix(normalizedBase, "library/") {
+						simpleBase := strings.TrimPrefix(normalizedBase, "library/")
+						if img, ok := opts.ExtraMappings.Images[simpleBase]; ok {
+							mappedImage = img
+						}
+					}
+				}
+			}
+
+			// If still no match, check for glob patterns with asterisks
+			if mappedImage == "" {
+				for pattern, img := range opts.ExtraMappings.Images {
+					if strings.HasSuffix(pattern, "*") {
+						prefix := strings.TrimSuffix(pattern, "*")
+						if strings.HasPrefix(baseFilename, prefix) {
+							mappedImage = img
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// Process the mapped image if found
+		if mappedImage != "" {
+			// Check if the mapped image includes a tag
+			if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
+				targetImage = parts[0]
+				convertedTag = parts[1]
+			} else {
+				targetImage = mappedImage
+			}
+		}
+
+		// If targetTag is not specified in mapping, calculate it using the existing logic
+		if convertedTag == "" {
+			convertedTag = calculateConvertedTag(targetImage, tag, from.TagDynamic, needsDevSuffix)
+		}
+
+		// Build the image reference
+		chainguardImageRef := buildImageReference(targetImage, convertedTag, opts)
+
+		// Now, if a custom converter is provided, let it process the result
+		if opts.FromLineConverter != nil {
+			customImageRef, err := opts.FromLineConverter(from, chainguardImageRef, needsDevSuffix)
+			if err != nil {
+				// If an error occurs, still return a valid FROM line using the original image
+				fromLine := DirectiveFrom + " " + from.Orig
+				if from.Alias != "" {
+					fromLine += " " + KeywordAs + " " + from.Alias
+				}
+				return fromLine
+			}
+
+			// Create the converted FROM line with the custom image
+			fromLine := DirectiveFrom + " " + customImageRef
+			if from.Alias != "" {
+				fromLine += " " + KeywordAs + " " + from.Alias
+			}
+			return fromLine
+		}
+
+		// If no custom converter, use the Chainguard converted reference
+		fromLine := DirectiveFrom + " " + chainguardImageRef
+		if from.Alias != "" {
+			fromLine += " " + KeywordAs + " " + from.Alias
+		}
+
+		return fromLine
+	} else {
+		// We found a direct match on base:tag in the mappings or a Docker Hub variant
+		finalImageRef := handleTaggedMappedImage(mappedImage, tag, needsDevSuffix, opts)
+
+		// Now, if a custom converter is provided, let it process the result
+		if opts.FromLineConverter != nil {
+			customImageRef, err := opts.FromLineConverter(from, finalImageRef, needsDevSuffix)
+			if err != nil {
+				// If an error occurs, still return a valid FROM line using the original image
+				fromLine := DirectiveFrom + " " + from.Orig
+				if from.Alias != "" {
+					fromLine += " " + KeywordAs + " " + from.Alias
+				}
+				return fromLine
+			}
+
+			// Create the converted FROM line with the custom image
+			fromLine := DirectiveFrom + " " + customImageRef
+			if from.Alias != "" {
+				fromLine += " " + KeywordAs + " " + from.Alias
+			}
+			return fromLine
+		}
+
+		// If no custom converter, use the mapped reference
+		fromLine := DirectiveFrom + " " + finalImageRef
+		if from.Alias != "" {
+			fromLine += " " + KeywordAs + " " + from.Alias
+		}
+
+		return fromLine
 	}
-
-	// Build the image reference
-	newImageRef := buildImageReference(targetImage, convertedTag, opts)
-
-	// Create the converted FROM line
-	fromLine := DirectiveFrom + " " + newImageRef
-	if from.Alias != "" {
-		fromLine += " " + KeywordAs + " " + from.Alias
-	}
-
-	return fromLine
 }
 
 // convertArgLine handles converting an ARG line used as base image
 func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunCommands map[int]bool, opts Options) (string, *ArgDetails) {
-	// Get ARG default value image reference
+	// Create a FromDetails structure from the ARG default value
 	base, tag := parseImageReference(arg.DefaultValue)
+
+	// Create a FromDetails to represent this ARG value as a FROM line
+	fromDetails := &FromDetails{
+		Base: base,
+		Tag:  tag,
+		Orig: arg.DefaultValue,
+	}
 
 	// Determine if we need the -dev suffix
 	needsDevSuffix := determineIfArgNeedsDevSuffix(arg.Name, lines, stagesWithRunCommands)
 
-	// Handle the basename
-	baseFilename := filepath.Base(base)
-
-	// Get the appropriate Chainguard image name using mappings
-	targetImage := baseFilename
-	var convertedTag string
-
-	// Check for exact match first
-	if mappedImage, ok := opts.Mappings.Images[baseFilename]; ok {
-		// Check if the mapped image includes a tag
-		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-			targetImage = parts[0]
-			convertedTag = parts[1]
+	// First check for exact match on the full image reference (with tag) if tag is present
+	var chainguardImageRef string
+	if tag != "" {
+		// Try exact match first
+		fullImageRef := base + ":" + tag
+		if img, ok := opts.ExtraMappings.Images[fullImageRef]; ok {
+			// Found a direct match on base:tag in the mappings
+			chainguardImageRef = handleTaggedMappedImage(img, tag, needsDevSuffix, opts)
 		} else {
-			targetImage = mappedImage
-		}
-	} else {
-		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.Mappings.Images {
-			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
-				if strings.HasPrefix(baseFilename, prefix) {
-					// Found a match with a glob pattern
-					if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-						targetImage = parts[0]
-						convertedTag = parts[1]
-					} else {
-						targetImage = mappedImage
+			// Try normalized variants for Docker Hub images with tags
+
+			// First try normalizing the base (removes Docker Hub prefixes)
+			normalizedBase := normalizeImageName(base)
+			if normalizedBase != base {
+				normalizedRef := normalizedBase + ":" + tag
+				if img, ok := opts.ExtraMappings.Images[normalizedRef]; ok {
+					chainguardImageRef = handleTaggedMappedImage(img, tag, needsDevSuffix, opts)
+				}
+			}
+
+			// If still no match, try with Docker Hub variants
+			if chainguardImageRef == "" {
+				// Generate variants like "docker.io/library/node:23.9"
+				baseVariants := generateDockerHubVariants(base)
+				for _, variant := range baseVariants {
+					variantWithTag := variant + ":" + tag
+					if img, ok := opts.ExtraMappings.Images[variantWithTag]; ok {
+						chainguardImageRef = handleTaggedMappedImage(img, tag, needsDevSuffix, opts)
+						break
 					}
-					break
+				}
+			}
+
+			// If still no match, try removing 'library/' prefix if present
+			if chainguardImageRef == "" && strings.HasPrefix(normalizedBase, "library/") {
+				simpleBase := strings.TrimPrefix(normalizedBase, "library/")
+				simpleRef := simpleBase + ":" + tag
+				if img, ok := opts.ExtraMappings.Images[simpleRef]; ok {
+					chainguardImageRef = handleTaggedMappedImage(img, tag, needsDevSuffix, opts)
 				}
 			}
 		}
 	}
 
-	// If targetTag is not specified in mapping, calculate it using the existing logic
-	if convertedTag == "" {
-		convertedTag = calculateConvertedTag(targetImage, tag, false, needsDevSuffix)
+	// If no direct match on full reference, continue with the existing logic
+	if chainguardImageRef == "" {
+		// First perform the default Chainguard conversion
+		// Calculate default image reference using common approach
+		baseFilename := filepath.Base(base)
+
+		// Get the appropriate Chainguard image name using mappings
+		targetImage := baseFilename
+		var convertedTag string
+
+		// Check for exact match first
+		if img, ok := opts.ExtraMappings.Images[baseFilename]; ok {
+			// Check if the mapped image includes a tag
+			if parts := strings.Split(img, ":"); len(parts) > 1 {
+				targetImage = parts[0]
+				convertedTag = parts[1]
+			} else {
+				targetImage = img
+			}
+		} else {
+			// No exact match, check for glob patterns with asterisks
+			for pattern, img := range opts.ExtraMappings.Images {
+				if strings.HasSuffix(pattern, "*") {
+					prefix := strings.TrimSuffix(pattern, "*")
+					if strings.HasPrefix(baseFilename, prefix) {
+						// Found a match with a glob pattern
+						if parts := strings.Split(img, ":"); len(parts) > 1 {
+							targetImage = parts[0]
+							convertedTag = parts[1]
+						} else {
+							targetImage = img
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// If targetTag is not specified in mapping, calculate it using the existing logic
+		if convertedTag == "" {
+			convertedTag = calculateConvertedTag(targetImage, tag, false, needsDevSuffix)
+		}
+
+		// Build the image reference
+		chainguardImageRef = buildImageReference(targetImage, convertedTag, opts)
 	}
 
-	// Build the image reference
-	newDefaultValue := buildImageReference(targetImage, convertedTag, opts)
+	// Get the converted image reference
+	var finalImageRef string
+
+	// If a custom FROM line converter is provided, use it
+	if opts.FromLineConverter != nil {
+		customImageRef, err := opts.FromLineConverter(fromDetails, chainguardImageRef, needsDevSuffix)
+		if err != nil {
+			// On error, use the original value
+			finalImageRef = arg.DefaultValue
+		} else {
+			finalImageRef = customImageRef
+		}
+	} else {
+		// Use the default converter result
+		finalImageRef = chainguardImageRef
+	}
 
 	// Create the converted ARG line
-	argLine := DirectiveArg + " " + arg.Name + "=" + newDefaultValue
+	argLine := DirectiveArg + " " + arg.Name + "=" + finalImageRef
 
 	// Create the Arg details
 	argDetails := &ArgDetails{
 		Name:         arg.Name,
-		DefaultValue: newDefaultValue,
+		DefaultValue: finalImageRef,
 		UsedAsBase:   true,
 	}
 
@@ -884,50 +1189,52 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 		return false, "", "", nil, nil, nil
 	}
 
-	// Determine which distro/package manager we're going to focus on
+	// First determine which distro/package manager we're dealing with
+	// We'll only convert the first type of package manager we find
 	var distro Distro
 	var firstPM Manager
-	var firstPMInstallIndex = -1
 	packagesDetected := []string{}
 	packagesToInstall := []string{}
 
-	// Process all shell parts in one pass
-	for i, part := range shell.Parts {
-		if Manager(part.Command) == firstPM || (firstPM == "" && PackageManagerInfoMap[Manager(part.Command)].Distro != "") {
-			// Set the package manager if it's the first one we've found
+	// Flag to indicate if any package manager command is found
+	foundPMCommand := false
+
+	// Process shell commands in one pass to identify package managers and collect packages
+	for _, part := range shell.Parts {
+		// Check if this is a known package manager command
+		if pmInfo, ok := PackageManagerInfoMap[Manager(part.Command)]; ok {
+			foundPMCommand = true
+
+			// If this is the first package manager we've seen, use it for determining the distro
 			if firstPM == "" {
 				firstPM = Manager(part.Command)
-				distro = PackageManagerInfoMap[firstPM].Distro
+				distro = pmInfo.Distro
 			}
 
-			// Check if this is an install command by finding the install keyword
-			pmInfo := PackageManagerInfoMap[firstPM]
-			installKeywordIndex := -1
-
-			// Find the index of the install keyword in arguments
-			for j, arg := range part.Args {
-				if arg == pmInfo.InstallKeyword {
-					installKeywordIndex = j
-					break
-				}
-			}
-
-			// If we found the install keyword, process the command
-			if installKeywordIndex >= 0 {
-				if firstPMInstallIndex == -1 {
-					firstPMInstallIndex = i
+			// Only collect packages if this is an install command of the primary package manager
+			if firstPM == Manager(part.Command) {
+				// Check if this is an install command by finding the install keyword
+				installKeywordIndex := -1
+				for j, arg := range part.Args {
+					if arg == pmInfo.InstallKeyword {
+						installKeywordIndex = j
+						break
+					}
 				}
 
-				// Collect packages, applying mapping if available
-				// Start from after the install keyword
-				for _, arg := range part.Args[installKeywordIndex+1:] {
-					if !strings.HasPrefix(arg, "-") {
-						packagesDetected = append(packagesDetected, arg)
+				// If we found the install keyword, collect the packages
+				if installKeywordIndex >= 0 {
+					// Get packages after the install keyword and skip options
+					for _, arg := range part.Args[installKeywordIndex+1:] {
+						if !strings.HasPrefix(arg, "-") {
+							packagesDetected = append(packagesDetected, arg)
 
-						if distroMap, exists := packageMap[distro]; exists && distroMap[arg] != nil {
-							packagesToInstall = append(packagesToInstall, distroMap[arg]...)
-						} else {
-							packagesToInstall = append(packagesToInstall, arg)
+							// Apply the package mapping if available
+							if distroMap, exists := packageMap[distro]; exists && distroMap[arg] != nil {
+								packagesToInstall = append(packagesToInstall, distroMap[arg]...)
+							} else {
+								packagesToInstall = append(packagesToInstall, arg)
+							}
 						}
 					}
 				}
@@ -935,9 +1242,9 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 		}
 	}
 
-	// If we have no packages to install, nothing to do
-	if len(packagesToInstall) == 0 || firstPMInstallIndex == -1 {
-		return false, distro, firstPM, nil, nil, shell
+	// If we didn't find any package manager commands, return unmodified
+	if !foundPMCommand {
+		return false, "", "", nil, nil, shell
 	}
 
 	// Sort and deduplicate packages
@@ -946,46 +1253,116 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 	slices.Sort(packagesToInstall)
 	packagesToInstall = slices.Compact(packagesToInstall)
 
-	// Create new shell parts, preserving the original order
-	newParts := make([]*ShellPart, 0, len(shell.Parts))
+	// Process all shell parts again to handle specific conversions
+	keepPart := make([]bool, len(shell.Parts))
 
-	// Add parts before the first package manager install command (non-PM only)
-	for i := 0; i < firstPMInstallIndex; i++ {
-		if Manager(shell.Parts[i].Command) != firstPM {
-			newParts = append(newParts, cloneShellPart(shell.Parts[i]))
-		}
-	}
+	// First identify special commands and decide which parts to keep
+	for i, part := range shell.Parts {
+		// Assume we keep this part unless otherwise decided
+		keepPart[i] = true
 
-	// Add the apk add command
-	delimiter := ""
-	if firstPMInstallIndex < len(shell.Parts)-1 {
-		delimiter = shell.Parts[firstPMInstallIndex].Delimiter
-	}
-	newParts = append(newParts, &ShellPart{
-		ExtraPre:  shell.Parts[firstPMInstallIndex].ExtraPre,
-		Command:   "apk",
-		Args:      append([]string{"add", "--no-cache"}, packagesToInstall...),
-		Delimiter: delimiter,
-	})
-
-	// Add remaining parts (non-PM only)
-	for i := firstPMInstallIndex + 1; i < len(shell.Parts); i++ {
-		if Manager(shell.Parts[i].Command) != firstPM {
-			part := cloneShellPart(shell.Parts[i])
-			// Last part should have no delimiter
-			if i == len(shell.Parts)-1 {
-				part.Delimiter = ""
+		// Handle known package manager commands
+		switch Manager(part.Command) {
+		case ManagerAptGet:
+			// Handle apt-get update
+			if contains(part.Args, "update") {
+				keepPart[i] = false
+			} else if contains(part.Args, "upgrade") {
+				keepPart[i] = false
+			} else if contains(part.Args, "install") {
+				// If this is the first package manager we found, drop this command
+				// as we'll add an apk add command later
+				if firstPM == ManagerAptGet {
+					keepPart[i] = false
+				}
 			}
-			newParts = append(newParts, part)
+		case ManagerApt:
+			// Handle apt update
+			if contains(part.Args, "update") {
+				keepPart[i] = false
+			} else if contains(part.Args, "upgrade") {
+				keepPart[i] = false
+			} else if contains(part.Args, "install") {
+				// If this is the first package manager we found, drop this command
+				// as we'll add an apk add command later
+				if firstPM == ManagerApt {
+					keepPart[i] = false
+				}
+			}
+		case ManagerYum, ManagerDnf, ManagerMicrodnf:
+			// Handle yum makecache
+			if contains(part.Args, "makecache") {
+				keepPart[i] = false
+			} else if contains(part.Args, "update") {
+				keepPart[i] = false
+			} else if contains(part.Args, "install") {
+				// If this is the first package manager we found, drop this command
+				// as we'll add an apk add command later
+				if firstPM == Manager(part.Command) {
+					keepPart[i] = false
+				}
+			}
+		case ManagerApk:
+			// Handle apk
+			if contains(part.Args, "update") {
+				// Drop apk update as we'll add --no-cache to apk add
+				keepPart[i] = false
+			} else if contains(part.Args, "add") {
+				// We'll create a new apk add command with all packages
+				keepPart[i] = false
+			}
 		}
 	}
 
-	// Fix the last delimiter
-	if len(newParts) > 0 {
-		newParts[len(newParts)-1].Delimiter = ""
+	// Create a new command with only the parts we want to keep
+	// plus the new apk add command at the beginning (if we have packages)
+	finalParts := make([]*ShellPart, 0)
+
+	// If we have packages to install, add the apk add command
+	if len(packagesToInstall) > 0 {
+		finalParts = append(finalParts, &ShellPart{
+			Command: "apk",
+			Args:    append([]string{"add", "--no-cache"}, packagesToInstall...),
+		})
 	}
 
-	return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{Parts: newParts}
+	// Add the commands we're keeping
+	for i, part := range shell.Parts {
+		if keepPart[i] {
+			newPart := cloneShellPart(part)
+			finalParts = append(finalParts, newPart)
+		}
+	}
+
+	// Set delimiters between commands
+	for i := range finalParts {
+		if i < len(finalParts)-1 {
+			finalParts[i].Delimiter = "&&"
+		} else {
+			finalParts[i].Delimiter = ""
+		}
+	}
+
+	// If no commands remain, add a no-op command
+	if len(finalParts) == 0 {
+		finalParts = append(finalParts, &ShellPart{
+			Command:   "true",
+			Args:      []string{},
+			Delimiter: "",
+		})
+	}
+
+	return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{Parts: finalParts}
+}
+
+// Helper function to check if a slice contains a string
+func contains(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function to clone a shell part
@@ -1078,4 +1455,109 @@ func convertBusyboxCommands(shell *ShellCommand, stagePackages []string) (bool, 
 	}
 
 	return false, shell
+}
+
+// normalizeDockerHubImage normalizes Docker Hub image references
+func normalizeDockerHubImage(imageRef string) string {
+	// Remove any trailing slashes
+	imageRef = strings.TrimRight(imageRef, "/")
+
+	// Remove any prefix that is not a valid Docker Hub image name
+	parts := strings.Split(imageRef, "/")
+	for _, part := range parts {
+		if strings.Contains(part, ".") || strings.Count(part, "/") > 1 {
+			continue
+		}
+		return part
+	}
+	return imageRef
+}
+
+// generateDockerHubVariants generates all possible Docker Hub variants for a given base
+func generateDockerHubVariants(base string) []string {
+	variants := []string{base}
+
+	// Check if base already has a registry prefix
+	if strings.Contains(base, "/") && strings.Contains(base, ".") {
+		// It's already a fully qualified name, don't generate additional variants
+		return variants
+	}
+
+	// Split the base to handle different cases
+	parts := strings.Split(base, "/")
+	var imageName string
+	var org string
+
+	// Handle different formats
+	if len(parts) == 1 {
+		// Format: "node"
+		imageName = parts[0]
+		variants = append(variants,
+			"docker.io/"+imageName,
+			"docker.io/library/"+imageName,
+			"registry-1.docker.io/library/"+imageName,
+			"index.docker.io/"+imageName,
+			"index.docker.io/library/"+imageName)
+	} else if len(parts) == 2 {
+		// Format: "someorg/someimage"
+		org = parts[0]
+		imageName = parts[1]
+		variants = append(variants,
+			"docker.io/"+org+"/"+imageName,
+			"registry-1.docker.io/"+org+"/"+imageName,
+			"index.docker.io/"+org+"/"+imageName)
+	}
+
+	return variants
+}
+
+// normalizeImageName normalizes Docker Hub image references
+func normalizeImageName(imageRef string) string {
+	// Remove any trailing slashes
+	imageRef = strings.TrimRight(imageRef, "/")
+
+	// Docker Hub registry domains to strip
+	dockerHubDomains := []string{
+		"registry-1.docker.io/",
+		"docker.io/",
+		"index.docker.io/",
+	}
+
+	// Remove Docker Hub registry prefixes if present
+	for _, domain := range dockerHubDomains {
+		if strings.HasPrefix(imageRef, domain) {
+			return strings.TrimPrefix(imageRef, domain)
+		}
+	}
+
+	return imageRef
+}
+
+// handleTaggedMappedImage processes a mapped image with a tag and returns the full image reference
+func handleTaggedMappedImage(mappedImage string, tag string, needsDevSuffix bool, opts Options) string {
+	var targetImage, convertedTag string
+
+	// Check if the mapped image includes a tag
+	if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
+		targetImage = parts[0]
+		convertedTag = parts[1]
+	} else {
+		targetImage = mappedImage
+		// If no tag in the mapping value, use the default tag logic
+		convertedTag = calculateConvertedTag(targetImage, tag, false, needsDevSuffix)
+	}
+
+	// For direct matches where the key includes a tag, we use the mapping value as is
+	// instead of applying the registry/org prefixes, unless it doesn't contain a slash
+	if strings.Contains(targetImage, "/") {
+		// The mapping specifies a fully qualified image with registry/repo
+		if convertedTag != "" {
+			return targetImage + ":" + convertedTag
+		} else {
+			return targetImage
+		}
+	} else {
+		// Apply the standard formatting with registry/org
+		return buildImageReference(targetImage, convertedTag, opts)
+	}
 }

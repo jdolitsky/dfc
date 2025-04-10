@@ -8,21 +8,21 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
+	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/clog/slag"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/chainguard-dev/dfc/pkg/dfc"
 )
-
-//go:embed mappings.yaml
-var mappingsYamlBytes []byte
 
 var (
 	// Version is the semantic version (added at compile time via -X main.Version=$VERSION)
@@ -33,10 +33,16 @@ var (
 )
 
 func main() {
-	// inspired by https://github.com/jonjohnsonjr/apkrane/blob/main/main.go
-	if err := cli().ExecuteContext(context.Background()); err != nil {
-		log.Fatal(err)
+	ctx := context.Background()
+	if err := mainE(ctx); err != nil {
+		clog.FromContext(ctx).Fatal(err.Error())
 	}
+}
+
+func mainE(ctx context.Context) error {
+	ctx, done := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer done()
+	return cli().ExecuteContext(ctx)
 }
 
 func cli() *cobra.Command {
@@ -45,6 +51,11 @@ func cli() *cobra.Command {
 	var org string
 	var registry string
 	var mappingsFile string
+	var updateFlag bool
+	var noBuiltInFlag bool
+
+	// Default log level is info
+	var level = slag.Level(slog.LevelInfo)
 
 	v := "dev"
 	if Version != "" {
@@ -57,10 +68,34 @@ func cli() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "dfc",
 		Example: "dfc <path_to_dockerfile>",
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.MaximumNArgs(1),
 		Version: v,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
+			// Setup logging
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &level})))
+			log := clog.New(slog.Default().Handler())
+			ctx := clog.WithLogger(cmd.Context(), log)
+
+			// If update flag is set but no args, just update and exit
+			if updateFlag && len(args) == 0 {
+				// Set up update options
+				updateOpts := dfc.UpdateOptions{}
+
+				// Set UserAgent if version info is available
+				if Version != "" {
+					updateOpts.UserAgent = "dfc/" + Version
+				}
+
+				if err := dfc.Update(ctx, updateOpts); err != nil {
+					return fmt.Errorf("failed to update: %w", err)
+				}
+				return nil
+			}
+
+			// If no args and no update flag, require an argument
+			if len(args) == 0 {
+				return fmt.Errorf("requires at least 1 arg(s), only received 0")
+			}
 
 			// Allow for piping into the CLI if first arg is "-"
 			input := cmd.InOrStdin()
@@ -87,32 +122,33 @@ func cli() *cobra.Command {
 				return fmt.Errorf("unable to parse dockerfile: %w", err)
 			}
 
-			// Try to parse and merge additional mappings from packages.yaml or custom mappings file
-			var mappings dfc.MappingsConfig
-			var mappingsBytes []byte
-
-			// Use custom mappings file if provided
-			if mappingsFile != "" {
-				var err error
-				mappingsBytes, err = os.ReadFile(mappingsFile)
-				if err != nil {
-					return fmt.Errorf("reading mappings file %s: %w", mappingsFile, err)
-				}
-				log.Printf("using custom mappings file: %s", mappingsFile)
-			} else {
-				// Use embedded mappings.yaml
-				mappingsBytes = mappingsYamlBytes
-			}
-
-			if err := yaml.Unmarshal(mappingsBytes, &mappings); err != nil {
-				return fmt.Errorf("unmarshalling package mappings: %w", err)
-			}
-
 			// Setup conversion options
 			opts := dfc.Options{
 				Organization: org,
 				Registry:     registry,
-				Mappings:     mappings,
+				Update:       updateFlag,
+				NoBuiltIn:    noBuiltInFlag,
+			}
+
+			// If custom mappings file is provided, load it as ExtraMappings
+			if mappingsFile != "" {
+				log.Info("Loading custom mappings file", "file", mappingsFile)
+				mappingsBytes, err := os.ReadFile(mappingsFile)
+				if err != nil {
+					return fmt.Errorf("reading mappings file %s: %w", mappingsFile, err)
+				}
+
+				var extraMappings dfc.MappingsConfig
+				if err := yaml.Unmarshal(mappingsBytes, &extraMappings); err != nil {
+					return fmt.Errorf("unmarshalling package mappings: %w", err)
+				}
+
+				opts.ExtraMappings = extraMappings
+			}
+
+			// If --no-builtin flag is used without --mappings, warn the user
+			if noBuiltInFlag && mappingsFile == "" {
+				log.Warn("Using --no-builtin without --mappings will use default conversion logic without any package/image mappings")
 			}
 
 			// Convert the Dockerfile
@@ -153,11 +189,11 @@ func cli() *cobra.Command {
 				originalMode := fileInfo.Mode().Perm()
 
 				backupPath := path + ".bak"
-				log.Printf("saving dockerfile backup to %s", backupPath)
+				log.Info("Saving dockerfile backup", "path", backupPath)
 				if err := os.WriteFile(backupPath, raw, originalMode); err != nil {
 					return fmt.Errorf("saving dockerfile backup to %s: %w", backupPath, err)
 				}
-				log.Printf("overwriting %s", path)
+				log.Info("Overwriting dockerfile", "path", path)
 				if err := os.WriteFile(path, []byte(result), originalMode); err != nil {
 					return fmt.Errorf("overwriting %s: %w", path, err)
 				}
@@ -176,6 +212,9 @@ func cli() *cobra.Command {
 	cmd.Flags().BoolVarP(&inPlace, "in-place", "i", false, "modified the Dockerfile in place (vs. stdout), saving original in a .bak file")
 	cmd.Flags().BoolVarP(&j, "json", "j", false, "print dockerfile as json (before conversion)")
 	cmd.Flags().StringVarP(&mappingsFile, "mappings", "m", "", "path to a custom package mappings YAML file (instead of the default)")
+	cmd.Flags().BoolVar(&updateFlag, "update", false, "check for and apply available updates")
+	cmd.Flags().BoolVar(&noBuiltInFlag, "no-builtin", false, "skip built-in package/image mappings, still apply default conversion logic")
+	cmd.Flags().Var(&level, "log-level", "log level (e.g. debug, info, warn, error)")
 
 	return cmd
 }

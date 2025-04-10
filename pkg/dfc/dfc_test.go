@@ -13,8 +13,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gopkg.in/yaml.v3"
 )
+
+// Empty default mappings for tests
+var emptyMappings = MappingsConfig{
+	Images:   map[string]string{},
+	Packages: PackageMap{},
+}
 
 func TestParseConvert(t *testing.T) {
 	convertTests := []struct {
@@ -805,6 +810,7 @@ RUN echo hello world
 							Base:   "python",
 							Tag:    "3.9-slim",
 							Digest: "sha256:123456abcdef",
+							Orig:   "python:3.9-slim@sha256:123456abcdef",
 						},
 					},
 				},
@@ -1114,6 +1120,7 @@ FROM $BASE_IMAGE AS base`,
 							Base:        "$BASE_IMAGE",
 							Alias:       "base",
 							BaseDynamic: true,
+							Orig:        "$BASE_IMAGE",
 						},
 					},
 				},
@@ -1141,6 +1148,7 @@ FROM ${BASE_IMAGE} AS base`,
 							Base:        "${BASE_IMAGE}",
 							Alias:       "base",
 							BaseDynamic: true,
+							Orig:        "${BASE_IMAGE}",
 						},
 					},
 				},
@@ -1162,7 +1170,7 @@ FROM ${BASE_IMAGE} AS base`,
 			}
 
 			converted, err := parsed.Convert(ctx, Options{
-				Mappings: MappingsConfig{
+				ExtraMappings: MappingsConfig{
 					Images: map[string]string{
 						"debian": DefaultChainguardBase + ":latest",
 					},
@@ -1172,6 +1180,8 @@ FROM ${BASE_IMAGE} AS base`,
 						},
 					},
 				},
+				Update:    false,
+				NoBuiltIn: false,
 			})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
@@ -1189,27 +1199,6 @@ func TestFullFileConversion(t *testing.T) {
 	beforeFiles, err := filepath.Glob("../../testdata/*.before.Dockerfile")
 	if err != nil {
 		t.Fatalf("Failed to find test files: %v", err)
-	}
-
-	var mappingsBytes []byte
-	mappingsBytes, err = os.ReadFile("../../mappings.yaml")
-	if err != nil {
-		t.Fatalf("Failed to read mappings file: %v", err)
-	}
-
-	var mappingsConfig MappingsConfig
-	if err := yaml.Unmarshal(mappingsBytes, &mappingsConfig); err != nil {
-		t.Fatalf("Failed to unmarshal package mappings: %v", err)
-	}
-
-	// Add default image mappings if none are provided in the file
-	if mappingsConfig.Images == nil {
-		mappingsConfig.Images = map[string]string{
-			"ubuntu": DefaultChainguardBase + ":latest",
-			"debian": DefaultChainguardBase + ":latest",
-			"fedora": DefaultChainguardBase + ":latest",
-			"alpine": DefaultChainguardBase + ":latest",
-		}
 	}
 
 	// Test each file
@@ -1236,9 +1225,7 @@ func TestFullFileConversion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to parse Dockerfile: %v", err)
 			}
-			converted, err := orig.Convert(ctx, Options{
-				Mappings: mappingsConfig,
-			})
+			converted, err := orig.Convert(ctx, Options{})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
 			}
@@ -1268,13 +1255,15 @@ RUN apt-get update && apt-get install -y nano`
 
 	// Create options
 	opts := Options{
-		Mappings: MappingsConfig{
+		ExtraMappings: MappingsConfig{
 			Packages: PackageMap{
 				DistroDebian: {
 					"nano": []string{"nano"},
 				},
 			},
 		},
+		Update:    false,
+		NoBuiltIn: false,
 	}
 
 	// First conversion
@@ -1316,5 +1305,493 @@ RUN apt-get update && apt-get install -y nano`
 	// Also ensure the results are identical (idempotent)
 	if firstResult != secondResult {
 		t.Errorf("Converting twice produced different results:\nFirst:\n%s\nSecond:\n%s", firstResult, secondResult)
+	}
+}
+
+// TestNoBuiltInOption tests that the NoBuiltIn option correctly skips the default mappings
+func TestNoBuiltInOption(t *testing.T) {
+	// Create a simple Dockerfile
+	content := `FROM debian:latest
+RUN apt-get update && apt-get install -y nano`
+
+	ctx := context.Background()
+
+	// Parse the Dockerfile
+	dockerfile, err := ParseDockerfile(ctx, []byte(content))
+	if err != nil {
+		t.Fatalf("Failed to parse test Dockerfile: %v", err)
+	}
+
+	// Case 1: With NoBuiltIn=false (default behavior)
+	opts1 := Options{
+		NoBuiltIn: false,
+		// Override the default mappings for testing
+		ExtraMappings: MappingsConfig{
+			Images: map[string]string{
+				"debian": "cgr.dev/test/debian:latest",
+			},
+		},
+	}
+
+	// Case 2: With NoBuiltIn=true
+	opts2 := Options{
+		NoBuiltIn: true,
+		// Provide the same mappings as ExtraMappings
+		ExtraMappings: MappingsConfig{
+			Images: map[string]string{
+				"debian": "cgr.dev/test/debian:latest",
+			},
+		},
+	}
+
+	// Case 3: With NoBuiltIn=true and no ExtraMappings
+	opts3 := Options{
+		NoBuiltIn: true,
+		// No ExtraMappings
+	}
+
+	// Convert with each option
+	converted1, err := dockerfile.Convert(ctx, opts1)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=false failed: %v", err)
+	}
+
+	converted2, err := dockerfile.Convert(ctx, opts2)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=true failed: %v", err)
+	}
+
+	converted3, err := dockerfile.Convert(ctx, opts3)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=true and no ExtraMappings failed: %v", err)
+	}
+
+	// Get string results
+	result1 := converted1.String()
+	result2 := converted2.String()
+	result3 := converted3.String()
+
+	// Check that result1 and result2 are the same (since they have the same mappings)
+	if !strings.Contains(result1, "cgr.dev/test/debian:latest") {
+		t.Errorf("Expected result1 to contain 'cgr.dev/test/debian:latest', got: %s", result1)
+	}
+
+	if !strings.Contains(result2, "cgr.dev/test/debian:latest") {
+		t.Errorf("Expected result2 to contain 'cgr.dev/test/debian:latest', got: %s", result2)
+	}
+
+	// Check that result3 still has conversion for the FROM line, just using default registry/org
+	if !strings.Contains(result3, "cgr.dev/ORG/debian:latest-dev") {
+		t.Errorf("Expected result3 to contain 'cgr.dev/ORG/debian:latest-dev', got: %s", result3)
+	}
+
+	// Verify that the RUN command is still converted in all cases
+	for i, result := range []string{result1, result2, result3} {
+		if !strings.Contains(result, "RUN apk add --no-cache nano") {
+			t.Errorf("Expected result%d to convert apt-get to apk add, got: %s", i+1, result)
+		}
+	}
+}
+
+// TestDockerHubImageVariants tests handling of different Docker Hub image variants
+func TestDockerHubImageVariants(t *testing.T) {
+	tests := []struct {
+		name              string
+		baseImage         string
+		mappings          map[string]string
+		expectedMappedImg string
+	}{
+		{
+			name:      "Simple name matches fully qualified Docker Hub image",
+			baseImage: "registry-1.docker.io/library/node",
+			mappings: map[string]string{
+				"node": "chainguard/node",
+			},
+			expectedMappedImg: "chainguard/node",
+		},
+		{
+			name:      "Simple name matches Docker Hub image with library",
+			baseImage: "docker.io/library/node",
+			mappings: map[string]string{
+				"node": "chainguard/node",
+			},
+			expectedMappedImg: "chainguard/node",
+		},
+		{
+			name:      "Simple name matches Docker Hub image without library",
+			baseImage: "docker.io/node",
+			mappings: map[string]string{
+				"node": "chainguard/node",
+			},
+			expectedMappedImg: "chainguard/node",
+		},
+		{
+			name:      "Simple name matches index.docker.io image with library",
+			baseImage: "index.docker.io/library/node",
+			mappings: map[string]string{
+				"node": "chainguard/node",
+			},
+			expectedMappedImg: "chainguard/node",
+		},
+		{
+			name:      "Simple name matches index.docker.io image without library",
+			baseImage: "index.docker.io/node",
+			mappings: map[string]string{
+				"node": "chainguard/node",
+			},
+			expectedMappedImg: "chainguard/node",
+		},
+		{
+			name:      "Org/repo format matches fully qualified Docker Hub image",
+			baseImage: "registry-1.docker.io/someorg/someimage",
+			mappings: map[string]string{
+				"someorg/someimage": "chainguard/image",
+			},
+			expectedMappedImg: "chainguard/image",
+		},
+		{
+			name:      "Org/repo format matches Docker Hub image",
+			baseImage: "docker.io/someorg/someimage",
+			mappings: map[string]string{
+				"someorg/someimage": "chainguard/image",
+			},
+			expectedMappedImg: "chainguard/image",
+		},
+		{
+			name:      "Org/repo format matches index.docker.io image",
+			baseImage: "index.docker.io/someorg/someimage",
+			mappings: map[string]string{
+				"someorg/someimage": "chainguard/image",
+			},
+			expectedMappedImg: "chainguard/image",
+		},
+		{
+			name:      "Exact match always takes precedence",
+			baseImage: "registry-1.docker.io/library/node",
+			mappings: map[string]string{
+				"node":                              "chainguard/node",
+				"registry-1.docker.io/library/node": "chainguard/exact-node",
+			},
+			expectedMappedImg: "chainguard/exact-node",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create test dockerfile with the FROM line
+			dockerfile := "FROM " + tc.baseImage
+			// Parse the dockerfile
+			df, err := ParseDockerfile(context.Background(), []byte(dockerfile))
+			if err != nil {
+				t.Fatalf("Error parsing dockerfile: %v", err)
+			}
+
+			// Set up options with our test mappings
+			opts := Options{
+				ExtraMappings: MappingsConfig{
+					Images: tc.mappings,
+				},
+			}
+
+			// Convert the dockerfile
+			convertedDockerfile, err := df.Convert(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Error converting dockerfile: %v", err)
+			}
+
+			// The converted dockerfile should have a FROM instruction as the first line
+			convertedContents := convertedDockerfile.String()
+			lines := strings.Split(convertedContents, "\n")
+
+			// Find the FROM line
+			var fromLine string
+			for _, line := range lines {
+				if strings.HasPrefix(strings.TrimSpace(line), "FROM ") {
+					fromLine = line
+					break
+				}
+			}
+
+			if fromLine == "" {
+				t.Fatalf("Could not find FROM instruction in converted dockerfile")
+			}
+
+			// Parse the FROM line to extract the image reference
+			fields := strings.Fields(fromLine)
+			if len(fields) < 2 {
+				t.Fatalf("FROM line doesn't have enough fields: %s", fromLine)
+			}
+
+			// Extract the image part without tag
+			convertedImg := fields[1]
+			if strings.Contains(convertedImg, ":") {
+				convertedImg = strings.Split(convertedImg, ":")[0]
+			}
+
+			// Get the registry and org from options
+			registry := opts.Registry
+			org := opts.Organization
+			if org == "" {
+				org = DefaultOrg
+			}
+
+			// Create expected image reference
+			var expectedImage string
+			if registry != "" {
+				expectedImage = registry + "/" + tc.expectedMappedImg
+			} else {
+				expectedImage = "cgr.dev/" + org + "/" + tc.expectedMappedImg
+			}
+
+			if convertedImg != expectedImage {
+				t.Errorf("Expected mapped image %s, got %s", expectedImage, convertedImg)
+			}
+		})
+	}
+}
+
+// TestNormalizeImageName tests the normalizeImageName function
+func TestNormalizeImageName(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		expected string
+	}{
+		{
+			name:     "Simple image name",
+			imageRef: "node",
+			expected: "node",
+		},
+		{
+			name:     "Docker Hub registry-1 with library prefix",
+			imageRef: "registry-1.docker.io/library/node",
+			expected: "library/node",
+		},
+		{
+			name:     "Docker Hub with library prefix",
+			imageRef: "docker.io/library/node",
+			expected: "library/node",
+		},
+		{
+			name:     "Docker Hub without library prefix",
+			imageRef: "docker.io/node",
+			expected: "node",
+		},
+		{
+			name:     "Docker index with library prefix",
+			imageRef: "index.docker.io/library/node",
+			expected: "library/node",
+		},
+		{
+			name:     "Docker index without library prefix",
+			imageRef: "index.docker.io/node",
+			expected: "node",
+		},
+		{
+			name:     "Organization image with Docker Hub registry",
+			imageRef: "docker.io/someorg/someimage",
+			expected: "someorg/someimage",
+		},
+		{
+			name:     "Organization image with registry-1",
+			imageRef: "registry-1.docker.io/someorg/someimage",
+			expected: "someorg/someimage",
+		},
+		{
+			name:     "Organization image with index",
+			imageRef: "index.docker.io/someorg/someimage",
+			expected: "someorg/someimage",
+		},
+		{
+			name:     "Non-Docker Hub image",
+			imageRef: "gcr.io/project/image",
+			expected: "gcr.io/project/image",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := normalizeImageName(tc.imageRef)
+			if result != tc.expected {
+				t.Errorf("normalizeImageName(%q) = %q, want %q", tc.imageRef, result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestGenerateDockerHubVariants tests the generateDockerHubVariants function
+func TestGenerateDockerHubVariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     string
+		expected []string
+	}{
+		{
+			name: "Simple name",
+			base: "node",
+			expected: []string{
+				"node",
+				"docker.io/node",
+				"docker.io/library/node",
+				"registry-1.docker.io/library/node",
+				"index.docker.io/node",
+				"index.docker.io/library/node",
+			},
+		},
+		{
+			name: "With organization",
+			base: "someorg/someimage",
+			expected: []string{
+				"someorg/someimage",
+				"docker.io/someorg/someimage",
+				"registry-1.docker.io/someorg/someimage",
+				"index.docker.io/someorg/someimage",
+			},
+		},
+		{
+			name: "Already has registry",
+			base: "docker.io/node",
+			expected: []string{
+				"docker.io/node",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := generateDockerHubVariants(tc.base)
+
+			// Check if the lengths match
+			if len(result) != len(tc.expected) {
+				t.Errorf("generateDockerHubVariants(%q) returned %d variants, want %d",
+					tc.base, len(result), len(tc.expected))
+				t.Logf("Got: %v", result)
+				t.Logf("Want: %v", tc.expected)
+				return
+			}
+
+			// Check that all expected variants are present
+			for _, expected := range tc.expected {
+				found := false
+				for _, actual := range result {
+					if actual == expected {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("generateDockerHubVariants(%q) missing expected variant %q",
+						tc.base, expected)
+					t.Logf("Got: %v", result)
+					return
+				}
+			}
+		})
+	}
+}
+
+// TestDockerHubFormatHandling tests the handling of Docker Hub format variants in image mappings
+func TestDockerHubFormatHandling(t *testing.T) {
+	testCases := []struct {
+		name           string
+		dockerfile     string
+		mappings       map[string]string
+		expectedOutput string
+	}{
+		{
+			name:       "Simple image name maps to fully qualified name",
+			dockerfile: "FROM node:14",
+			mappings: map[string]string{
+				"node": "cgr-test",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/cgr-test:14",
+		},
+		{
+			name:       "Docker Hub with library prefix maps to simple name",
+			dockerfile: "FROM docker.io/library/node:14",
+			mappings: map[string]string{
+				"node": "cgr-test",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/cgr-test:14",
+		},
+		{
+			name:       "Registry-1 with library prefix maps to simple name",
+			dockerfile: "FROM registry-1.docker.io/library/node:14",
+			mappings: map[string]string{
+				"node": "cgr-test",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/cgr-test:14",
+		},
+		{
+			name:       "Index with library prefix maps to simple name",
+			dockerfile: "FROM index.docker.io/library/node:14",
+			mappings: map[string]string{
+				"node": "cgr-test",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/cgr-test:14",
+		},
+		{
+			name:       "Docker Hub without library prefix maps to simple name",
+			dockerfile: "FROM docker.io/node:14",
+			mappings: map[string]string{
+				"node": "cgr-test",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/cgr-test:14",
+		},
+		{
+			name:       "Org/repo format with Docker Hub prefix maps correctly",
+			dockerfile: "FROM docker.io/someorg/someimage:1.0",
+			mappings: map[string]string{
+				"someorg/someimage": "test-image",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/test-image:1.0",
+		},
+		{
+			name:       "Org/repo format with registry-1 prefix maps correctly",
+			dockerfile: "FROM registry-1.docker.io/someorg/someimage:1.0",
+			mappings: map[string]string{
+				"someorg/someimage": "test-image",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/test-image:1.0",
+		},
+		{
+			name:       "Exact match takes precedence over normalized match",
+			dockerfile: "FROM docker.io/library/node:14",
+			mappings: map[string]string{
+				"node":                   "simple-match",
+				"docker.io/library/node": "exact-match",
+			},
+			expectedOutput: "FROM cgr.dev/chainguard/exact-match:14",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Set up a Dockerfile with the test case FROM instruction
+			df, err := ParseDockerfile(context.Background(), []byte(tc.dockerfile))
+			if err != nil {
+				t.Fatalf("Failed to parse Dockerfile: %v", err)
+			}
+
+			// Convert the Dockerfile with our mappings
+			opts := Options{
+				ExtraMappings: MappingsConfig{
+					Images: tc.mappings,
+				},
+				Organization: "chainguard",
+			}
+
+			converted, err := df.Convert(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Failed to convert Dockerfile: %v", err)
+			}
+
+			// Check the result
+			result := converted.String()
+			result = strings.TrimSpace(result)
+			if result != tc.expectedOutput {
+				t.Errorf("Expected output:\n%s\nActual output:\n%s", tc.expectedOutput, result)
+			}
+		})
 	}
 }
