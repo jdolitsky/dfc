@@ -64,6 +64,64 @@ mv ./Dockerfile.bak ./Dockerfile # revert
 Note: the `Dockerfile` and `Dockerfile.chainguard` in the root of this repo are not actually for building `dfc`, they
 are symlinks to files in the [`testdata/`](./testdata/) folder so users can run the commands in this README.
 
+## Examples
+
+For complete before and after examples, see the [`testdata/`](./testdata/) folder.
+
+### Convert a single `FROM` line
+
+```sh
+echo "FROM node" | dfc -
+```
+
+Result:
+
+```Dockerfile
+FROM cgr.dev/ORG/node:latest-dev
+```
+
+### Convert a single `RUN` line
+
+```sh
+echo "RUN apt-get update && apt-get install -y nano" | dfc -
+```
+
+Result:
+
+```Dockerfile
+RUN apk add --no-cache nano
+```
+
+### Convert a whole Dockerfile
+
+```sh
+cat <<DOCKERFILE | dfc -
+FROM node
+RUN apt-get update && apt-get install -y nano
+DOCKERFILE
+```
+
+Result:
+
+```Dockerfile
+FROM cgr.dev/ORG/node:latest-dev
+USER root
+RUN apk add --no-cache nano
+```
+
+## Supported platforms
+
+`dfc` detects the package manager being used and maps this to
+a supported distro in order to properly convert RUN lines.
+The following platforms are recognized:
+
+| OS                           | Package manager            |
+| ---------------------------- | -------------------------- |
+| Alpine ("alpine")            | `apk`                      |
+| Debian/Ubuntu ("debian")     | `apt-get` / `apt`          |
+| Fedora/RedHat/UBI ("fedora") | `yum` / `dnf` / `microdnf` |
+
+
 ## Configuration
 
 ### Chainguard org (cgr.dev namespace)
@@ -153,64 +211,6 @@ Note that the `builtin-mappings.yaml` file is generated via internal automation 
 - **XDG_CACHE_HOME**: Stores cached data following the [OCI layout specification]((https://github.com/opencontainers/image-spec/blob/main/image-layout.md). By default, this is `~/.cache/dev.chainguard.dfc/` (on macOS: `~/Library/Caches/dev.chainguard.dfc/`).
 
 Note: `dfc` does not make any network requests unless the `--update` flag is provided. However, `dfc` will perform a syscall to check for the existence of the `builtin-mappings.yaml` file (symlink) in the XDG_CONFIG directory.
-
-## Examples
-
-For complete before and after examples, see the [`testdata/`](./testdata/) folder.
-
-### Convert a single `FROM` line
-
-```sh
-echo "FROM node" | dfc -
-```
-
-Result:
-
-```Dockerfile
-FROM cgr.dev/ORG/node:latest-dev
-```
-
-### Convert a single `RUN` line
-
-```sh
-echo "RUN apt-get update && apt-get install -y nano" | dfc -
-```
-
-Result:
-
-```Dockerfile
-RUN apk add --no-cache nano
-```
-
-### Convert a whole Dockerfile
-
-```sh
-cat <<DOCKERFILE | dfc -
-FROM node
-RUN apt-get update && apt-get install -y nano
-DOCKERFILE
-```
-
-Result:
-
-```Dockerfile
-FROM cgr.dev/ORG/node:latest-dev
-USER root
-RUN apk add --no-cache nano
-```
-
-## Supported platforms
-
-`dfc` detects the package manager being used and maps this to
-a supported distro in order to properly convert RUN lines.
-The following platforms are recognized:
-
-| OS                           | Package manager            |
-| ---------------------------- | -------------------------- |
-| Alpine ("alpine")            | `apk`                      |
-| Debian/Ubuntu ("debian")     | `apt-get` / `apt`          |
-| Fedora/RedHat/UBI ("fedora") | `yum` / `dnf` / `microdnf` |
-
 
 ## How it works
 
