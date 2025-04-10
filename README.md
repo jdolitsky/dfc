@@ -370,6 +370,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/chainguard-dev/dfc/pkg/dfc"
@@ -396,7 +397,7 @@ func main() {
 	// Convert
 	converted, err := dockerfile.Convert(ctx, dfc.Options{
 		Organization: org,
-		// Registry: "r.example.com/cgr-mirror" // Optional: registry override
+		// Registry: "r.example.com/cgr-mirror", // Optional: registry override
 		// Update:   true,                      // Optional: update mappings before conversion
 		// ExtraMappings: myCustomMappings,     // Optional: overlay mappings on top of builtin
 		// NoBuiltIn: true,                     // Optional: skip built-in mappings
@@ -409,6 +410,111 @@ func main() {
 	fmt.Println(converted)
 }
 ```
+
+### Custom Base Image Conversion
+
+You can customize how base images are converted by providing a `FromLineConverter` function. This example shows how to handle internal repository images differently while using the default Chainguard conversion for other images:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"path/filepath"
+	"strings"
+
+	"github.com/chainguard-dev/dfc/pkg/dfc"
+)
+
+func main() {
+	ctx := context.Background()
+	
+	// Sample Dockerfile with multiple FROM lines
+	raw := []byte(strings.TrimSpace(`
+		FROM node:14
+		RUN npm install
+		
+		FROM internal-repo.example.com/python:3.9
+		COPY --from=0 /app/node_modules /app/node_modules
+		RUN pip install -r requirements.txt
+	`))
+
+	// Parse the Dockerfile
+	dockerfile, err := dfc.ParseDockerfile(ctx, raw)
+	if err != nil {
+		log.Fatalf("ParseDockerfile(): %v", err)
+	}
+
+	// Define a custom converter that:
+	// 1. For internal repository images, adds basename as a suffix to the tag
+	// 2. For all other images, uses the default Chainguard conversion
+	customConverter := func(from *dfc.FromDetails, converted string) (string, error) {
+		// Check if this is an internal repository image
+		if strings.Contains(from.Orig, "internal-repo") {
+			// Extract the image basename
+			basename := filepath.Base(from.Base)
+			
+			// Extract tag part if present
+			tagPart := ""
+			if from.Tag != "" {
+				tagPart = from.Tag
+			} else {
+				tagPart = "latest"
+			}
+			
+			// For internal images, we maintain the internal repo but add our org
+			// and image basename as a suffix to the tag
+			return fmt.Sprintf("internal-repo.example.com/%s:%s-my-org-%s", 
+				from.Base, tagPart, basename), nil
+		}
+		
+		// For all other images, use the default Chainguard conversion
+		return converted, nil
+	}
+
+	// Convert with custom image conversion
+	converted, err := dockerfile.Convert(ctx, dfc.Options{
+		Organization:      "my-org",
+		FromLineConverter: customConverter,
+	})
+	if err != nil {
+		log.Fatalf("dockerfile.Convert(): %v", err)
+	}
+
+	// Print the results
+	fmt.Println("Original Dockerfile:")
+	fmt.Println(string(raw))
+	fmt.Println("\nConverted Dockerfile:")
+	fmt.Println(converted)
+}
+```
+
+Example output:
+```
+Original Dockerfile:
+FROM node:14
+RUN npm install
+
+FROM internal-repo.example.com/python:3.9
+COPY --from=0 /app/node_modules /app/node_modules
+RUN pip install -r requirements.txt
+
+Converted Dockerfile:
+FROM cgr.dev/my-org/node:14-dev
+USER root
+RUN apk add --no-cache npm
+RUN npm install
+
+FROM internal-repo.example.com/python:3.9-my-org-python
+USER root
+COPY --from=0 /app/node_modules /app/node_modules
+RUN apk add --no-cache pip
+RUN pip install -r requirements.txt
+```
+
+This approach gives you full control over image reference conversion while preserving DFC's package manager and command conversion capabilities.
 
 ## Limitations
 

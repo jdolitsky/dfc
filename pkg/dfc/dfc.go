@@ -115,6 +115,7 @@ type FromDetails struct {
 	Parent      int    `json:"parent,omitempty"`
 	BaseDynamic bool   `json:"baseDynamic,omitempty"`
 	TagDynamic  bool   `json:"tagDynamic,omitempty"`
+	Orig        string `json:"orig,omitempty"` // Original full image reference
 }
 
 // RunDetails holds details about a RUN directive
@@ -209,6 +210,9 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 			// Capture space + AS + space to get exact length
 			asKeywordWithSpaces := " " + KeywordAs + " "
 
+			// Save the original image reference before any parsing
+			var origImageRef string
+
 			// Split by case-insensitive " AS " pattern
 			asParts := strings.Split(strings.ToUpper(fromPart), asKeywordWithSpaces)
 			if len(asParts) > 1 {
@@ -219,15 +223,24 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 					basePart := strings.TrimSpace(fromPart[:asIndex])
 					aliasPart := strings.TrimSpace(fromPart[asIndex+len(asKeywordWithSpaces):])
 					fromPart = basePart
+					origImageRef = basePart // Capture only the image reference part
 					alias = aliasPart
 
 					// Store this alias for parent references
 					stageAliases[strings.ToLower(alias)] = currentStage
 				}
+			} else {
+				origImageRef = fromPart
 			}
 
 			// Parse the image reference
 			var base, tag, digest string
+
+			// Store the original image reference before we split it up
+			if origImageRef != "" {
+				// We need to preserve the original reference exactly as is
+				// origImageRef already has the right value at this point
+			}
 
 			// Check for digest
 			if digestParts := strings.Split(fromPart, "@"); len(digestParts) > 1 {
@@ -258,6 +271,7 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 				Parent:      parent,
 				BaseDynamic: strings.Contains(base, "$"),
 				TagDynamic:  strings.Contains(tag, "$"),
+				Orig:        origImageRef,
 			}
 		}
 
@@ -381,13 +395,44 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 	return dockerfile, nil
 }
 
+// PackageMap maps distros to package mappings
+type PackageMap map[Distro]map[string][]string
+
+// FromLineConverter is a function type for custom image reference conversion in FROM directives.
+// It takes a FromDetails struct containing information about the original image and the
+// string that would be produced by the default Chainguard conversion, and allows for customizing
+// the final image reference.
+// If an error is returned, the original image reference will be used instead.
+// The converter is only responsible for returning the image reference part (e.g., "cgr.dev/chainguard/node:latest"),
+// not the full FROM line with directives like "AS" - those will be handled by the calling code.
+//
+// Example usage of a custom converter:
+//
+//	myConverter := func(from *FromDetails, converted string) (string, error) {
+//	    // For most images, just use the default Chainguard conversion
+//	    if from.Base != "python" {
+//	        return converted, nil
+//	    }
+//
+//	    // Special handling for python images
+//	    return "myregistry.example.com/python:" + from.Tag, nil
+//	}
+//
+//	// Use the custom converter with DFC
+//	dockerFile.Convert(ctx, dfc.Options{
+//	    Organization: "myorg",
+//	    FromLineConverter: myConverter,
+//	})
+type FromLineConverter func(from *FromDetails, converted string) (string, error)
+
 // Options defines the configuration options for the conversion
 type Options struct {
-	Organization  string
-	Registry      string
-	ExtraMappings MappingsConfig
-	Update        bool // When true, update cached mappings before conversion
-	NoBuiltIn     bool // When true, don't use built-in mappings, only ExtraMappings
+	Organization      string
+	Registry          string
+	ExtraMappings     MappingsConfig
+	Update            bool              // When true, update cached mappings before conversion
+	NoBuiltIn         bool              // When true, don't use built-in mappings, only ExtraMappings
+	FromLineConverter FromLineConverter // Optional custom converter for FROM lines
 }
 
 // MappingsConfig represents the structure of builtin-mappings.yaml
@@ -395,9 +440,6 @@ type MappingsConfig struct {
 	Images   map[string]string `yaml:"images"`
 	Packages PackageMap        `yaml:"packages"`
 }
-
-// PackageMap maps distros to package mappings
-type PackageMap map[Distro]map[string][]string
 
 // parseImageReference extracts base and tag from an image reference
 func parseImageReference(imageRef string) (base, tag string) {
@@ -478,9 +520,10 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 			if shouldConvertFromLine(line.From) {
 				// Use the merged mappings for conversion
 				optsWithMappings := Options{
-					Organization:  opts.Organization,
-					Registry:      opts.Registry,
-					ExtraMappings: mappings,
+					Organization:      opts.Organization,
+					Registry:          opts.Registry,
+					ExtraMappings:     mappings,
+					FromLineConverter: opts.FromLineConverter,
 				}
 				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, optsWithMappings)
 			}
@@ -490,9 +533,10 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 		if line.Arg != nil && line.Arg.UsedAsBase && line.Arg.DefaultValue != "" {
 			// Use the merged mappings for conversion
 			optsWithMappings := Options{
-				Organization:  opts.Organization,
-				Registry:      opts.Registry,
-				ExtraMappings: mappings,
+				Organization:      opts.Organization,
+				Registry:          opts.Registry,
+				ExtraMappings:     mappings,
+				FromLineConverter: opts.FromLineConverter,
 			}
 			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, optsWithMappings)
 			newLine.Converted = argLine
@@ -566,11 +610,13 @@ func copyFromDetails(from *FromDetails) *FromDetails {
 		Parent:      from.Parent,
 		BaseDynamic: from.BaseDynamic,
 		TagDynamic:  from.TagDynamic,
+		Orig:        from.Orig,
 	}
 }
 
 // convertFromLine handles converting a FROM line
 func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int]bool, opts Options) string {
+	// First, always do the default Chainguard conversion
 	// Determine if we need the -dev suffix
 	needsDevSuffix := stagesWithRunCommands[stage]
 
@@ -665,10 +711,30 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	}
 
 	// Build the image reference
-	newImageRef := buildImageReference(targetImage, convertedTag, opts)
+	chainguardImageRef := buildImageReference(targetImage, convertedTag, opts)
 
-	// Create the converted FROM line
-	fromLine := DirectiveFrom + " " + newImageRef
+	// Now, if a custom converter is provided, let it process the result
+	if opts.FromLineConverter != nil {
+		customImageRef, err := opts.FromLineConverter(from, chainguardImageRef)
+		if err != nil {
+			// If an error occurs, still return a valid FROM line using the original image
+			fromLine := DirectiveFrom + " " + from.Orig
+			if from.Alias != "" {
+				fromLine += " " + KeywordAs + " " + from.Alias
+			}
+			return fromLine
+		}
+
+		// Create the converted FROM line with the custom image
+		fromLine := DirectiveFrom + " " + customImageRef
+		if from.Alias != "" {
+			fromLine += " " + KeywordAs + " " + from.Alias
+		}
+		return fromLine
+	}
+
+	// If no custom converter, use the Chainguard converted reference
+	fromLine := DirectiveFrom + " " + chainguardImageRef
 	if from.Alias != "" {
 		fromLine += " " + KeywordAs + " " + from.Alias
 	}
@@ -678,13 +744,21 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 
 // convertArgLine handles converting an ARG line used as base image
 func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunCommands map[int]bool, opts Options) (string, *ArgDetails) {
-	// Get ARG default value image reference
+	// Create a FromDetails structure from the ARG default value
 	base, tag := parseImageReference(arg.DefaultValue)
+
+	// Create a FromDetails to represent this ARG value as a FROM line
+	fromDetails := &FromDetails{
+		Base: base,
+		Tag:  tag,
+		Orig: arg.DefaultValue,
+	}
 
 	// Determine if we need the -dev suffix
 	needsDevSuffix := determineIfArgNeedsDevSuffix(arg.Name, lines, stagesWithRunCommands)
 
-	// Handle the basename
+	// First perform the default Chainguard conversion
+	// Calculate default image reference using common approach
 	baseFilename := filepath.Base(base)
 
 	// Get the appropriate Chainguard image name using mappings
@@ -725,15 +799,32 @@ func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunComma
 	}
 
 	// Build the image reference
-	newDefaultValue := buildImageReference(targetImage, convertedTag, opts)
+	chainguardImageRef := buildImageReference(targetImage, convertedTag, opts)
+
+	// Get the converted image reference
+	var finalImageRef string
+
+	// If a custom FROM line converter is provided, use it
+	if opts.FromLineConverter != nil {
+		customImageRef, err := opts.FromLineConverter(fromDetails, chainguardImageRef)
+		if err != nil {
+			// On error, use the original value
+			finalImageRef = arg.DefaultValue
+		} else {
+			finalImageRef = customImageRef
+		}
+	} else {
+		// Use the default converter result
+		finalImageRef = chainguardImageRef
+	}
 
 	// Create the converted ARG line
-	argLine := DirectiveArg + " " + arg.Name + "=" + newDefaultValue
+	argLine := DirectiveArg + " " + arg.Name + "=" + finalImageRef
 
 	// Create the Arg details
 	argDetails := &ArgDetails{
 		Name:         arg.Name,
-		DefaultValue: newDefaultValue,
+		DefaultValue: finalImageRef,
 		UsedAsBase:   true,
 	}
 
