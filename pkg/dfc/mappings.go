@@ -17,16 +17,6 @@ import (
 //go:embed builtin-mappings.yaml
 var builtinMappingsYAMLBytes []byte
 
-// For testing - override in tests if needed
-var getDefaultMappingsFunc = defaultGetDefaultMappings
-
-// GetDefaultMappings returns the default mapping configuration
-// It first tries to load from the XDG config directory
-// If not available, falls back to the embedded mappings
-func GetDefaultMappings(ctx context.Context, update bool) (MappingsConfig, error) {
-	return getDefaultMappingsFunc(ctx, update)
-}
-
 // defaultGetDefaultMappings is the real implementation of GetDefaultMappings
 func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig, error) {
 	log := clog.FromContext(ctx)

@@ -22,29 +22,7 @@ var emptyMappings = MappingsConfig{
 	Packages: PackageMap{},
 }
 
-// setupMappingsMock configures the test environment to use empty mappings
-// This should be called at the beginning of each test function
-func setupMappingsMock() func() {
-	// Save the original function
-	originalFunc := getDefaultMappingsFunc
-
-	// Override default mappings function for tests
-	// This avoids filesystem access and network calls during tests
-	getDefaultMappingsFunc = func(ctx context.Context, update bool) (MappingsConfig, error) {
-		return emptyMappings, nil
-	}
-
-	// Return a cleanup function to restore the original behavior if needed
-	return func() {
-		getDefaultMappingsFunc = originalFunc
-	}
-}
-
 func TestParseConvert(t *testing.T) {
-	// Setup mock mappings
-	cleanup := setupMappingsMock()
-	defer cleanup()
-
 	convertTests := []struct {
 		name     string
 		raw      string
@@ -1200,7 +1178,8 @@ FROM ${BASE_IMAGE} AS base`,
 						},
 					},
 				},
-				Update: false,
+				Update:    false,
+				NoBuiltIn: false,
 			})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
@@ -1214,10 +1193,6 @@ FROM ${BASE_IMAGE} AS base`,
 
 // TestFullFileConversion checks that .before. Dockerfiles convert to .after. Dockerfiles
 func TestFullFileConversion(t *testing.T) {
-	// Setup mock mappings
-	cleanup := setupMappingsMock()
-	defer cleanup()
-
 	// Find all .before.Dockerfile files in the testdata directory
 	beforeFiles, err := filepath.Glob("../../testdata/*.before.Dockerfile")
 	if err != nil {
@@ -1272,6 +1247,7 @@ func TestFullFileConversion(t *testing.T) {
 			converted, err := orig.Convert(ctx, Options{
 				ExtraMappings: mappingsConfig,
 				Update:        false,
+				NoBuiltIn:     false,
 			})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
@@ -1288,10 +1264,6 @@ func TestFullFileConversion(t *testing.T) {
 }
 
 func TestDoubleConversionUserRoot(t *testing.T) {
-	// Setup mock mappings
-	cleanup := setupMappingsMock()
-	defer cleanup()
-
 	// Create a simple Dockerfile with a FROM and RUN instruction
 	content := `FROM python:3.9
 RUN apt-get update && apt-get install -y nano`
@@ -1313,7 +1285,8 @@ RUN apt-get update && apt-get install -y nano`
 				},
 			},
 		},
-		Update: false,
+		Update:    false,
+		NoBuiltIn: false,
 	}
 
 	// First conversion
@@ -1355,5 +1328,90 @@ RUN apt-get update && apt-get install -y nano`
 	// Also ensure the results are identical (idempotent)
 	if firstResult != secondResult {
 		t.Errorf("Converting twice produced different results:\nFirst:\n%s\nSecond:\n%s", firstResult, secondResult)
+	}
+}
+
+// TestNoBuiltInOption tests that the NoBuiltIn option correctly skips the default mappings
+func TestNoBuiltInOption(t *testing.T) {
+	// Create a simple Dockerfile
+	content := `FROM debian:latest
+RUN apt-get update && apt-get install -y nano`
+
+	ctx := context.Background()
+
+	// Parse the Dockerfile
+	dockerfile, err := ParseDockerfile(ctx, []byte(content))
+	if err != nil {
+		t.Fatalf("Failed to parse test Dockerfile: %v", err)
+	}
+
+	// Case 1: With NoBuiltIn=false (default behavior)
+	opts1 := Options{
+		NoBuiltIn: false,
+		// Override the default mappings for testing
+		ExtraMappings: MappingsConfig{
+			Images: map[string]string{
+				"debian": "cgr.dev/test/debian:latest",
+			},
+		},
+	}
+
+	// Case 2: With NoBuiltIn=true
+	opts2 := Options{
+		NoBuiltIn: true,
+		// Provide the same mappings as ExtraMappings
+		ExtraMappings: MappingsConfig{
+			Images: map[string]string{
+				"debian": "cgr.dev/test/debian:latest",
+			},
+		},
+	}
+
+	// Case 3: With NoBuiltIn=true and no ExtraMappings
+	opts3 := Options{
+		NoBuiltIn: true,
+		// No ExtraMappings
+	}
+
+	// Convert with each option
+	converted1, err := dockerfile.Convert(ctx, opts1)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=false failed: %v", err)
+	}
+
+	converted2, err := dockerfile.Convert(ctx, opts2)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=true failed: %v", err)
+	}
+
+	converted3, err := dockerfile.Convert(ctx, opts3)
+	if err != nil {
+		t.Fatalf("Convert with NoBuiltIn=true and no ExtraMappings failed: %v", err)
+	}
+
+	// Get string results
+	result1 := converted1.String()
+	result2 := converted2.String()
+	result3 := converted3.String()
+
+	// Check that result1 and result2 are the same (since they have the same mappings)
+	if !strings.Contains(result1, "cgr.dev/test/debian:latest") {
+		t.Errorf("Expected result1 to contain 'cgr.dev/test/debian:latest', got: %s", result1)
+	}
+
+	if !strings.Contains(result2, "cgr.dev/test/debian:latest") {
+		t.Errorf("Expected result2 to contain 'cgr.dev/test/debian:latest', got: %s", result2)
+	}
+
+	// Check that result3 still has conversion for the FROM line, just using default registry/org
+	if !strings.Contains(result3, "cgr.dev/ORG/debian:latest-dev") {
+		t.Errorf("Expected result3 to contain 'cgr.dev/ORG/debian:latest-dev', got: %s", result3)
+	}
+
+	// Verify that the RUN command is still converted in all cases
+	for i, result := range []string{result1, result2, result3} {
+		if !strings.Contains(result, "RUN apk add --no-cache nano") {
+			t.Errorf("Expected result%d to convert apt-get to apk add, got: %s", i+1, result)
+		}
 	}
 }

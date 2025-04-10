@@ -52,6 +52,7 @@ func cli() *cobra.Command {
 	var registry string
 	var mappingsFile string
 	var updateFlag bool
+	var noBuiltInFlag bool
 
 	// Default log level is info
 	var level = slag.Level(slog.LevelInfo)
@@ -129,6 +130,7 @@ func cli() *cobra.Command {
 				Organization: org,
 				Registry:     registry,
 				Update:       updateFlag,
+				NoBuiltIn:    noBuiltInFlag,
 			}
 
 			// If custom mappings file is provided, load it as ExtraMappings
@@ -145,6 +147,11 @@ func cli() *cobra.Command {
 				}
 
 				opts.ExtraMappings = extraMappings
+			}
+
+			// If --no-builtin flag is used without --mappings, warn the user
+			if noBuiltInFlag && mappingsFile == "" {
+				log.Warn("Using --no-builtin without --mappings will use default conversion logic without any package/image mappings")
 			}
 
 			// Convert the Dockerfile
@@ -209,6 +216,7 @@ func cli() *cobra.Command {
 	cmd.Flags().BoolVarP(&j, "json", "j", false, "print dockerfile as json (before conversion)")
 	cmd.Flags().StringVarP(&mappingsFile, "mappings", "m", "", "path to a custom package mappings YAML file (instead of the default)")
 	cmd.Flags().BoolVar(&updateFlag, "update", false, "check for and apply available updates")
+	cmd.Flags().BoolVar(&noBuiltInFlag, "no-builtin", false, "skip built-in package/image mappings, still apply default conversion logic")
 	cmd.Flags().Var(&level, "log-level", "log level (e.g. debug, info, warn, error)")
 
 	return cmd

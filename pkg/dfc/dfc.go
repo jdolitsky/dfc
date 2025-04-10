@@ -387,6 +387,7 @@ type Options struct {
 	Registry      string
 	ExtraMappings MappingsConfig
 	Update        bool // When true, update cached mappings before conversion
+	NoBuiltIn     bool // When true, don't use built-in mappings, only ExtraMappings
 }
 
 // MappingsConfig represents the structure of mappings.yaml
@@ -412,16 +413,35 @@ func parseImageReference(imageRef string) (base, tag string) {
 
 // Convert applies the conversion to the Dockerfile and returns a new converted Dockerfile
 func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, error) {
-	// Load the default mappings
-	defaultMappings, err := GetDefaultMappings(ctx, opts.Update)
-	if err != nil {
-		return nil, fmt.Errorf("loading default mappings: %w", err)
-	}
+	// Initialize mappings
+	var mappings MappingsConfig
 
-	// Merge with the extra mappings if provided
-	mappings := defaultMappings
-	if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
-		mappings = MergeMappings(defaultMappings, opts.ExtraMappings)
+	// Handle mappings based on options
+	if !opts.NoBuiltIn {
+		// Load the default mappings (unless NoBuiltIn is true)
+		defaultMappings, err := defaultGetDefaultMappings(ctx, opts.Update)
+		if err != nil {
+			return nil, fmt.Errorf("loading default mappings: %w", err)
+		}
+
+		// Use default mappings
+		mappings = defaultMappings
+
+		// Merge with the extra mappings if provided
+		if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
+			mappings = MergeMappings(defaultMappings, opts.ExtraMappings)
+		}
+	} else {
+		// NoBuiltIn is true, use only ExtraMappings if provided
+		// Otherwise, use empty mappings
+		mappings = opts.ExtraMappings
+		// Initialize empty maps if they don't exist
+		if mappings.Images == nil {
+			mappings.Images = make(map[string]string)
+		}
+		if mappings.Packages == nil {
+			mappings.Packages = make(PackageMap)
+		}
 	}
 
 	// Create a new Dockerfile for the converted content
