@@ -12,9 +12,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/clog/slag"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
@@ -30,15 +33,16 @@ var (
 )
 
 func main() {
-	// Set up structured logger
-	log := clog.New(slog.Default().Handler())
-	ctx := clog.WithLogger(context.Background(), log)
-
-	// inspired by https://github.com/jonjohnsonjr/apkrane/blob/main/main.go
-	if err := cli().ExecuteContext(ctx); err != nil {
-		log.Error("execution failed", "error", err)
-		os.Exit(1)
+	ctx := context.Background()
+	if err := mainE(ctx); err != nil {
+		clog.FromContext(ctx).Fatal(err.Error())
 	}
+}
+
+func mainE(ctx context.Context) error {
+	ctx, done := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer done()
+	return cli().ExecuteContext(ctx)
 }
 
 func cli() *cobra.Command {
@@ -48,6 +52,9 @@ func cli() *cobra.Command {
 	var registry string
 	var mappingsFile string
 	var updateFlag bool
+
+	// Default log level is info
+	var level = slag.Level(slog.LevelInfo)
 
 	v := "dev"
 	if Version != "" {
@@ -63,8 +70,10 @@ func cli() *cobra.Command {
 		Args:    cobra.MaximumNArgs(1),
 		Version: v,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			log := clog.FromContext(ctx)
+			// Setup logging
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &level})))
+			log := clog.New(slog.Default().Handler())
+			ctx := clog.WithLogger(cmd.Context(), log)
 
 			// If update flag is set but no args, just update and exit
 			if updateFlag && len(args) == 0 {
@@ -200,6 +209,7 @@ func cli() *cobra.Command {
 	cmd.Flags().BoolVarP(&j, "json", "j", false, "print dockerfile as json (before conversion)")
 	cmd.Flags().StringVarP(&mappingsFile, "mappings", "m", "", "path to a custom package mappings YAML file (instead of the default)")
 	cmd.Flags().BoolVar(&updateFlag, "update", false, "check for and apply available updates")
+	cmd.Flags().Var(&level, "log-level", "log level (e.g. debug, info, warn, error)")
 
 	return cmd
 }
