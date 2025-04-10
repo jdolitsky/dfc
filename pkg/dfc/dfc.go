@@ -390,7 +390,7 @@ type Options struct {
 	NoBuiltIn     bool // When true, don't use built-in mappings, only ExtraMappings
 }
 
-// MappingsConfig represents the structure of mappings.yaml
+// MappingsConfig represents the structure of builtin-mappings.yaml
 type MappingsConfig struct {
 	Images   map[string]string `yaml:"images"`
 	Packages PackageMap        `yaml:"packages"`
@@ -586,17 +586,69 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	var convertedTag string
 
 	// Check for exact match first, in specific order
-	// TODO: support index.docker.io etc. based on the base
+	// For example, if the mapping is just node, it should match all of the following:
+	// FROM registry-1.docker.io/library/node
+	// FROM docker.io/node
+	// FROM docker.io/library/node
+	// FROM index.docker.io/node
+	// FROM index.docker.io/library/node
+	//
+	// If the mapping is someorg/somerepo, it should match all of the following:
+	// FROM registry-1.docker.io/someorg/somerepo
+	// FROM docker.io/someorg/somerepo
+	// FROM index.docker.io/someorg/somerepo
 	var mappedImage string
-	lookups := []string{base, baseFilename}
-	for _, lookup := range lookups {
-		var ok bool
-		if mappedImage, ok = opts.ExtraMappings.Images[lookup]; ok {
-			break
+
+	// Try exact match first
+	if img, ok := opts.ExtraMappings.Images[base]; ok {
+		mappedImage = img
+	} else if img, ok := opts.ExtraMappings.Images[baseFilename]; ok {
+		mappedImage = img
+	} else {
+		// Generate all possible variants for the base image
+		baseVariants := generateDockerHubVariants(base)
+
+		// Check if any variant matches a key in the mappings
+		for _, variant := range baseVariants {
+			if img, ok := opts.ExtraMappings.Images[variant]; ok {
+				mappedImage = img
+				break
+			}
+		}
+
+		// If still no match, try to normalize the base and check against simple keys
+		if mappedImage == "" {
+			normalizedBase := normalizeImageName(base)
+
+			// Check if the normalized base matches any key
+			if img, ok := opts.ExtraMappings.Images[normalizedBase]; ok {
+				mappedImage = img
+			} else {
+				// Try removing library/ prefix if it exists
+				if strings.HasPrefix(normalizedBase, "library/") {
+					simpleBase := strings.TrimPrefix(normalizedBase, "library/")
+					if img, ok := opts.ExtraMappings.Images[simpleBase]; ok {
+						mappedImage = img
+					}
+				}
+			}
+		}
+
+		// If still no match, check for glob patterns with asterisks
+		if mappedImage == "" {
+			for pattern, img := range opts.ExtraMappings.Images {
+				if strings.HasSuffix(pattern, "*") {
+					prefix := strings.TrimSuffix(pattern, "*")
+					if strings.HasPrefix(baseFilename, prefix) {
+						mappedImage = img
+						break
+					}
+				}
+			}
 		}
 	}
 
-	// Check for exact match first
+	// Process the mapped image if found
 	if mappedImage != "" {
 		// Check if the mapped image includes a tag
 		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
@@ -604,23 +656,6 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 			convertedTag = parts[1]
 		} else {
 			targetImage = mappedImage
-		}
-	} else {
-		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.ExtraMappings.Images {
-			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
-				if strings.HasPrefix(baseFilename, prefix) {
-					// Found a match with a glob pattern
-					if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-						targetImage = parts[0]
-						convertedTag = parts[1]
-					} else {
-						targetImage = mappedImage
-					}
-					break
-				}
-			}
 		}
 	}
 
@@ -1134,4 +1169,80 @@ func convertBusyboxCommands(shell *ShellCommand, stagePackages []string) (bool, 
 	}
 
 	return false, shell
+}
+
+// normalizeDockerHubImage normalizes Docker Hub image references
+func normalizeDockerHubImage(imageRef string) string {
+	// Remove any trailing slashes
+	imageRef = strings.TrimRight(imageRef, "/")
+
+	// Remove any prefix that is not a valid Docker Hub image name
+	parts := strings.Split(imageRef, "/")
+	for _, part := range parts {
+		if strings.Contains(part, ".") || strings.Count(part, "/") > 1 {
+			continue
+		}
+		return part
+	}
+	return imageRef
+}
+
+// generateDockerHubVariants generates all possible Docker Hub variants for a given base
+func generateDockerHubVariants(base string) []string {
+	variants := []string{base}
+
+	// Check if base already has a registry prefix
+	if strings.Contains(base, "/") && strings.Contains(base, ".") {
+		// It's already a fully qualified name, don't generate additional variants
+		return variants
+	}
+
+	// Split the base to handle different cases
+	parts := strings.Split(base, "/")
+	var imageName string
+	var org string
+
+	// Handle different formats
+	if len(parts) == 1 {
+		// Format: "node"
+		imageName = parts[0]
+		variants = append(variants,
+			"docker.io/"+imageName,
+			"docker.io/library/"+imageName,
+			"registry-1.docker.io/library/"+imageName,
+			"index.docker.io/"+imageName,
+			"index.docker.io/library/"+imageName)
+	} else if len(parts) == 2 {
+		// Format: "someorg/someimage"
+		org = parts[0]
+		imageName = parts[1]
+		variants = append(variants,
+			"docker.io/"+org+"/"+imageName,
+			"registry-1.docker.io/"+org+"/"+imageName,
+			"index.docker.io/"+org+"/"+imageName)
+	}
+
+	return variants
+}
+
+// normalizeImageName normalizes Docker Hub image references
+func normalizeImageName(imageRef string) string {
+	// Remove any trailing slashes
+	imageRef = strings.TrimRight(imageRef, "/")
+
+	// Docker Hub registry domains to strip
+	dockerHubDomains := []string{
+		"registry-1.docker.io/",
+		"docker.io/",
+		"index.docker.io/",
+	}
+
+	// Remove Docker Hub registry prefixes if present
+	for _, domain := range dockerHubDomains {
+		if strings.HasPrefix(imageRef, domain) {
+			return strings.TrimPrefix(imageRef, domain)
+		}
+	}
+
+	return imageRef
 }

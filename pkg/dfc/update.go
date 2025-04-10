@@ -7,7 +7,7 @@ package dfc
 
 import (
 	"context"
-	"crypto/sha512"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,7 +23,9 @@ import (
 
 const (
 	// defaultMappingsURL is the default URL for fetching mappings
-	defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/mappings.yaml"
+	// TODO: uncomment after PR is merged
+	// defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/mappings.yaml"
+	defaultMappingsURL = "https://raw.githubusercontent.com/jdolitsky/dfc/refs/heads/update-dev/pkg/dfc/builtin-mappings.yaml"
 
 	// orgName is the organization name used in XDG paths
 	orgName = "dev.chainguard.dfc"
@@ -70,10 +72,10 @@ func getConfigDir() string {
 	return xdg.ConfigHome
 }
 
-// GetMappingsConfigPath returns the path to the mappings.yaml file in XDG_CONFIG_HOME
+// GetMappingsConfigPath returns the path to the builtin-mappings.yaml file in XDG_CONFIG_HOME
 func getMappingsConfigPath() (string, error) {
 	// Use xdg library's ConfigFile to get the proper location
-	mappingsPath, err := xdg.ConfigFile(filepath.Join(orgName, "mappings.yaml"))
+	mappingsPath, err := xdg.ConfigFile(filepath.Join(orgName, "builtin-mappings.yaml"))
 	if err != nil {
 		return "", fmt.Errorf("getting mappings config path: %w", err)
 	}
@@ -86,7 +88,7 @@ func getMappingsConfigPath() (string, error) {
 	return mappingsPath, nil
 }
 
-// getMappingsConfig reads and returns the contents of the mappings.yaml file
+// getMappingsConfig reads and returns the contents of the builtin-mappings.yaml file
 func getMappingsConfig() ([]byte, error) {
 	mappingsPath, err := getMappingsConfigPath()
 	if err != nil {
@@ -113,8 +115,8 @@ func getMappingsConfig() ([]byte, error) {
 
 // initOCILayout initializes the OCI layout in the cache directory
 func initOCILayout(cacheDir string) error {
-	// Create the blobs/sha512 directory
-	blobsDir := filepath.Join(cacheDir, "blobs", "sha512")
+	// Create the blobs/sha256 directory
+	blobsDir := filepath.Join(cacheDir, "blobs", "sha256")
 	if err := os.MkdirAll(blobsDir, 0755); err != nil {
 		return fmt.Errorf("creating blobs directory: %w", err)
 	}
@@ -255,10 +257,10 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		return fmt.Errorf("reading response body: %w", err)
 	}
 
-	// Calculate SHA512 hash
-	hash := sha512.Sum512(body)
+	// Calculate SHA256 hash
+	hash := sha256.Sum256(body)
 	hashString := hex.EncodeToString(hash[:])
-	digestString := "sha512:" + hashString
+	digestString := "sha256:" + hashString
 
 	// Get the XDG cache directory
 	cacheDir := getCacheDir()
@@ -277,7 +279,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 	}
 
 	// Check if we already have this mapping file
-	blobPath := filepath.Join(cacheDir, "blobs", "sha512", hashString)
+	blobPath := filepath.Join(cacheDir, "blobs", "sha256", hashString)
 	if _, err := os.Stat(blobPath); err == nil {
 
 		// Get the XDG config directory for the symlink
@@ -290,7 +292,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		}
 
 		// Check if the symlink exists and points to the correct file
-		symlinkPath := filepath.Join(nestedConfigDir, "mappings.yaml")
+		symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
 		currentTarget, err := os.Readlink(symlinkPath)
 		if err != nil || currentTarget != blobPath {
 			// Remove existing symlink if it exists
@@ -308,7 +310,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		log.Info("Saving latest version of mappings", "location", blobPath)
 
 		// Save the mapping file
-		blobsDir := filepath.Join(cacheDir, "blobs", "sha512")
+		blobsDir := filepath.Join(cacheDir, "blobs", "sha256")
 		if err := os.MkdirAll(blobsDir, 0755); err != nil {
 			return fmt.Errorf("creating blobs directory: %w", err)
 		}
@@ -332,7 +334,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		}
 
 		// Create or update the symlink to point to the latest mappings file
-		symlinkPath := filepath.Join(nestedConfigDir, "mappings.yaml")
+		symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
 		log.Info("Created symlink to latest mappings", "location", symlinkPath)
 
 		// Remove existing symlink if it exists
@@ -343,7 +345,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		}
 	}
 
-	log.Info("Mappings checksum", "sha512", hashString)
+	log.Info("Mappings checksum", "sha256", hashString)
 
 	return nil
 }

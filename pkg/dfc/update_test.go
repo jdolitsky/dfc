@@ -7,7 +7,7 @@ package dfc
 
 import (
 	"context"
-	"crypto/sha512"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -64,10 +64,10 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-// setupTestServer creates a test HTTP server serving the mock mappings.yaml
+// setupTestServer creates a test HTTP server serving the mock builtin-mappings.yaml
 func setupTestServer(t *testing.T) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/mappings.yaml" {
+		if r.URL.Path == "/builtin-mappings.yaml" {
 			w.Header().Set("Content-Type", "text/yaml")
 			w.WriteHeader(http.StatusOK)
 			_, err := w.Write([]byte(testMappingsYAML))
@@ -147,9 +147,9 @@ func setupTestEnvironment(t *testing.T) (xdgTempDir string, xdgCacheDir string, 
 	return xdgTempDir, xdgCacheDir, xdgConfigDir, cleanup
 }
 
-// computeSHA512 calculates the SHA512 hash of data
-func computeSHA512(data []byte) string {
-	hash := sha512.Sum512(data)
+// computeSHA256 calculates the SHA256 hash of data
+func computeSHA256(data []byte) string {
+	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
 
@@ -189,8 +189,8 @@ func TestPathsUseTestDirectories(t *testing.T) {
 	if !strings.Contains(mappingsPath, configDir) {
 		t.Errorf("GetMappingsConfigPath() = %v, expected to contain test dir %v", mappingsPath, configDir)
 	}
-	if !strings.HasSuffix(mappingsPath, "mappings.yaml") {
-		t.Errorf("GetMappingsConfigPath() = %v, expected to end with mappings.yaml", mappingsPath)
+	if !strings.HasSuffix(mappingsPath, "builtin-mappings.yaml") {
+		t.Errorf("GetMappingsConfigPath() = %v, expected to end with builtin-mappings.yaml", mappingsPath)
 	}
 }
 
@@ -208,7 +208,7 @@ func TestGetMappingsConfig(t *testing.T) {
 	}
 
 	// Create mappings file
-	mappingsPath := filepath.Join(configDir, orgName, "mappings.yaml")
+	mappingsPath := filepath.Join(configDir, orgName, "builtin-mappings.yaml")
 	if err := os.MkdirAll(filepath.Dir(mappingsPath), 0755); err != nil {
 		t.Fatalf("Failed to create directories: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUpdateIndexJSON(t *testing.T) {
 	}
 
 	// Update index.json
-	testDigest := "sha512:abcdef123456"
+	testDigest := "sha256:abcdef123456"
 	testSize := int64(1024)
 	if err := updateIndexJSON(testCacheDir, testDigest, testSize); err != nil {
 		t.Fatalf("updateIndexJSON() error = %v", err)
@@ -363,7 +363,7 @@ func TestUpdateWithCancelledContext(t *testing.T) {
 	cancel() // Cancel immediately
 
 	opts := UpdateOptions{
-		MappingsURL: "https://example.com/mappings.yaml",
+		MappingsURL: "https://example.com/builtin-mappings.yaml",
 	}
 
 	err := Update(ctx, opts)
@@ -392,19 +392,19 @@ func TestUpdateEmptyBody(t *testing.T) {
 	}
 
 	// The update should have calculated a hash for an empty body
-	hash := sha512.Sum512([]byte{})
+	hash := sha256.Sum256([]byte{})
 	hashString := hex.EncodeToString(hash[:])
 
 	// Check if blob file was created
 	cacheDir := getCacheDir()
-	blobPath := filepath.Join(cacheDir, "blobs", "sha512", hashString)
+	blobPath := filepath.Join(cacheDir, "blobs", "sha256", hashString)
 	if _, err := os.Stat(blobPath); err != nil {
 		t.Errorf("Blob file not created: %v", err)
 	}
 
 	// Check if symlink was created
 	configDir := getConfigDir()
-	symlinkPath := filepath.Join(configDir, orgName, "mappings.yaml")
+	symlinkPath := filepath.Join(configDir, orgName, "builtin-mappings.yaml")
 	if _, err := os.Stat(symlinkPath); err != nil {
 		t.Errorf("Symlink not created: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestUpdateWithBlockedWrite(t *testing.T) {
 	defer os.Chmod(cacheDir, 0755) // Restore permissions
 
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.yaml",
 	}
 
 	err := Update(context.Background(), opts)
@@ -508,9 +508,9 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Calculate hash of test mappings
-	hash := sha512.Sum512([]byte(testMappingsYAML))
+	hash := sha256.Sum256([]byte(testMappingsYAML))
 	hashString := hex.EncodeToString(hash[:])
-	digestString := "sha512:" + hashString
+	digestString := "sha256:" + hashString
 
 	// Create cache directory
 	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
@@ -523,8 +523,8 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 		t.Fatalf("Failed to initialize OCI layout: %v", err)
 	}
 
-	// Create the blobs/sha512 directory
-	blobsDir := filepath.Join(testCacheDir, "blobs", "sha512")
+	// Create the blobs/sha256 directory
+	blobsDir := filepath.Join(testCacheDir, "blobs", "sha256")
 	if err := os.MkdirAll(blobsDir, 0755); err != nil {
 		t.Fatalf("Failed to create blobs directory: %v", err)
 	}
@@ -552,14 +552,14 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 		t.Fatalf("Failed to create wrong file: %v", err)
 	}
 
-	symlinkPath := filepath.Join(nestedConfigDir, "mappings.yaml")
+	symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
 	if err := os.Symlink(wrongFile, symlinkPath); err != nil {
 		t.Fatalf("Failed to create symlink: %v", err)
 	}
 
 	// Run update
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.yaml",
 	}
 
 	err := Update(context.Background(), opts)
@@ -594,7 +594,7 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 
 	// Run update
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.yaml",
 	}
 
 	err := Update(context.Background(), opts)
@@ -608,7 +608,7 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 	}
 
 	// Verify blobs directory was created
-	blobsDir := filepath.Join(testCacheDir, "blobs", "sha512")
+	blobsDir := filepath.Join(testCacheDir, "blobs", "sha256")
 	if _, err := os.Stat(blobsDir); err != nil {
 		t.Errorf("Blobs directory not created: %v", err)
 	}
@@ -675,7 +675,7 @@ func TestUpdate_ResponseBodyReadError(t *testing.T) {
 	}
 
 	opts := UpdateOptions{
-		MappingsURL: "https://example.com/mappings.yaml",
+		MappingsURL: "https://example.com/builtin-mappings.yaml",
 	}
 
 	err := Update(context.Background(), opts)

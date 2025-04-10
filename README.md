@@ -111,15 +111,48 @@ Note: the `--registry` flag takes precedence over the `--org` flag.
 
 ### Custom mappings file
 
-If you need to use a modified version of the default, embedded mappings
-file [`mappings.yaml`](./mappings.yaml), use the `--mappings` flag:
+If you need to supply extra image or package mappings, use the `--mappings` flag:
 
 ```sh
 dfc --mappings="./custom-mappings.yaml" ./Dockerfile
 ```
 
-Want to submit an update to the default [`mappings.yaml`](./mappings.yaml)?
-Please [open a GitHub pull request](https://github.com/chainguard-dev/dfc/compare).
+By default, custom mappings specified with `--mappings` will overlay the built-in mappings found in [`pkg/dfc/builtin-mappings.yaml`](./pkg/dfc/builtin-mappings.yaml). If you wish to bypass the built-in mappings entirely and only use your custom mappings, use the `--no-builtin` flag:
+
+```sh
+dfc --mappings="./custom-mappings.yaml" --no-builtin ./Dockerfile
+```
+
+### Updating Mappings
+
+The `--update` flag is used to update the cached mappings from the latest version available in the repository:
+
+```sh
+dfc --update
+```
+
+You can use this flag as a standalone command to update mappings without performing any conversion, or combine it with a conversion command to ensure you're using the latest mappings:
+
+```sh
+dfc --update ./Dockerfile
+```
+
+When combined with a conversion command, the update check is performed prior to running the conversion, ensuring your conversions use the most up-to-date mappings available.
+
+### Submitting New Mappings
+
+If you'd like to request new mappings to be added to the built-in mappings file, please [open a GitHub issue](https://github.com/chainguard-dev/dfc/issues/new?template=BLANK_ISSUE).
+
+Note that the `builtin-mappings.yaml` file is generated via internal automation and cannot be edited directly. Your issue will be reviewed by the maintainers, and if approved, the mappings will be added to the internal automation that generates the built-in mappings.
+
+### Configuration Files and Cache
+
+`dfc` follows the XDG specification for configuration and cache directories:
+
+- **XDG_CONFIG_HOME**: Stores configuration files, including a symlink to `builtin-mappings.yaml`. By default, this is `~/.config/dev.chainguard.dfc/` (on macOS: `~/Library/Application\ Support/dev.chainguard.dfc/`).
+- **XDG_CACHE_HOME**: Stores cached data following the [OCI layout specification]((https://github.com/opencontainers/image-spec/blob/main/image-layout.md). By default, this is `~/.cache/dev.chainguard.dfc/` (on macOS: `~/Library/Caches/dev.chainguard.dfc/`).
+
+Note: `dfc` does not make any network requests unless the `--update` flag is provided. However, `dfc` will perform a syscall to check for the existence of the `builtin-mappings.yaml` file (symlink) in the XDG_CONFIG directory.
 
 ## Examples
 
@@ -234,6 +267,7 @@ When converting Dockerfiles, `dfc` applies the following logic to determine whic
 - If a mapping includes a tag (e.g., `chainguard-base:latest`), that tag is always used
 - If no tag is specified in the mapping (e.g., `node`), tag selection follows the standard tag mapping rules
 - If no mapping is found for a base image, the original name is preserved and tag mapping rules apply
+- Docker Hub images with full domain references (e.g., `docker.io/library/node`, `index.docker.io/library/node`) are normalized before mapping by removing the domain and `library/` prefix, which allows them to match against the simple image name entries in mappings.yaml
 
 ### Tag Mapping
 The tag conversion follows these rules:
