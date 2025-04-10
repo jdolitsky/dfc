@@ -3,7 +3,7 @@ Copyright 2025 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package update
+package dfc
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/adrg/xdg"
+	"github.com/chainguard-dev/clog"
 )
 
 const (
@@ -28,8 +29,8 @@ const (
 	OrgName = "dev.chainguard.dfc"
 )
 
-// Options configures the update behavior
-type Options struct {
+// UpdateOptions configures the update behavior
+type UpdateOptions struct {
 	// UserAgent is the user agent string to use for update requests
 	UserAgent string
 
@@ -37,56 +38,42 @@ type Options struct {
 	MappingsURL string
 }
 
-// OCILayout represents the oci-layout file
-type OCILayout struct {
+// ociLayout represents the oci-layout file
+type ociLayout struct {
 	ImageLayoutVersion string `json:"imageLayoutVersion"`
 }
 
-// OCIIndex represents the index.json file
-type OCIIndex struct {
+// ociIndex represents the index.json file
+type ociIndex struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	MediaType     string          `json:"mediaType"`
-	Manifests     []OCIDescriptor `json:"manifests"`
+	Manifests     []ociDescriptor `json:"manifests"`
 }
 
-// OCIDescriptor represents a descriptor in the index
-type OCIDescriptor struct {
+// ociDescriptor represents a descriptor in the index
+type ociDescriptor struct {
 	MediaType   string            `json:"mediaType"`
 	Digest      string            `json:"digest"`
 	Size        int64             `json:"size"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
-// GetCacheDir returns the XDG cache directory for dfc using the xdg library
-func GetCacheDir() (string, error) {
+// getCacheDir returns the XDG cache directory for dfc using the xdg library
+func getCacheDir() string {
 	// Use xdg library to get the cache directory path
-	cacheDir := filepath.Join(xdg.CacheHome, OrgName, "mappings")
-
-	// Ensure the directory exists
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return "", fmt.Errorf("creating cache directory: %w", err)
-	}
-
-	return cacheDir, nil
+	return filepath.Join(xdg.CacheHome, OrgName, "mappings")
 }
 
-// GetConfigDir returns the XDG config directory for dfc using the xdg library
-func GetConfigDir() (string, error) {
+// getConfigDir returns the XDG config directory for dfc using the xdg library
+func getConfigDir() string {
 	// Use xdg library to get the config directory
-	return xdg.ConfigHome, nil
+	return xdg.ConfigHome
 }
-
-// Variables for dependency injection in tests
-var (
-	jsonMarshal       = json.Marshal
-	jsonMarshalIndent = json.MarshalIndent
-	xdgConfigFile     = xdg.ConfigFile
-)
 
 // GetMappingsConfigPath returns the path to the mappings.yaml file in XDG_CONFIG_HOME
-func GetMappingsConfigPath() (string, error) {
+func getMappingsConfigPath() (string, error) {
 	// Use xdg library's ConfigFile to get the proper location
-	mappingsPath, err := xdgConfigFile(filepath.Join(OrgName, "mappings.yaml"))
+	mappingsPath, err := xdg.ConfigFile(filepath.Join(OrgName, "mappings.yaml"))
 	if err != nil {
 		return "", fmt.Errorf("getting mappings config path: %w", err)
 	}
@@ -99,15 +86,9 @@ func GetMappingsConfigPath() (string, error) {
 	return mappingsPath, nil
 }
 
-// GetMappingsConfigPathFunc is the function type for GetMappingsConfigPath
-type GetMappingsConfigPathFunc func() (string, error)
-
-// Default implementation for use in tests
-var getMappingsConfigPathFn GetMappingsConfigPathFunc = GetMappingsConfigPath
-
 // GetMappingsConfig reads and returns the contents of the mappings.yaml file
 func GetMappingsConfig() ([]byte, error) {
-	mappingsPath, err := getMappingsConfigPathFn()
+	mappingsPath, err := getMappingsConfigPath()
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +120,8 @@ func initOCILayout(cacheDir string) error {
 	}
 
 	// Create the oci-layout file
-	layout := OCILayout{ImageLayoutVersion: "1.0.0"}
-	layoutData, err := jsonMarshal(layout)
+	layout := ociLayout{ImageLayoutVersion: "1.0.0"}
+	layoutData, err := json.Marshal(layout)
 	if err != nil {
 		return fmt.Errorf("marshalling oci-layout: %w", err)
 	}
@@ -150,13 +131,13 @@ func initOCILayout(cacheDir string) error {
 	}
 
 	// Create an empty index.json file
-	index := OCIIndex{
+	index := ociIndex{
 		SchemaVersion: 2,
 		MediaType:     "application/vnd.oci.image.index.v1+json",
-		Manifests:     []OCIDescriptor{},
+		Manifests:     []ociDescriptor{},
 	}
 
-	indexData, err := jsonMarshalIndent(index, "", "  ")
+	indexData, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshalling index.json: %w", err)
 	}
@@ -177,22 +158,22 @@ func updateIndexJSON(cacheDir, digest string, size int64) error {
 		return fmt.Errorf("reading index.json: %w", err)
 	}
 
-	var index OCIIndex
+	var index ociIndex
 	if len(indexData) > 0 {
 		if err := json.Unmarshal(indexData, &index); err != nil {
 			return fmt.Errorf("unmarshalling index.json: %w", err)
 		}
 	} else {
 		// Initialize a new index
-		index = OCIIndex{
+		index = ociIndex{
 			SchemaVersion: 2,
 			MediaType:     "application/vnd.oci.image.index.v1+json",
-			Manifests:     []OCIDescriptor{},
+			Manifests:     []ociDescriptor{},
 		}
 	}
 
 	// Remove any existing entries with this digest
-	filteredManifests := []OCIDescriptor{}
+	filteredManifests := []ociDescriptor{}
 	for _, manifest := range index.Manifests {
 		// Skip if it has the same digest
 		if manifest.Digest == digest {
@@ -204,7 +185,7 @@ func updateIndexJSON(cacheDir, digest string, size int64) error {
 	// Create a new descriptor for the mapping
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	descriptor := OCIDescriptor{
+	descriptor := ociDescriptor{
 		MediaType: "application/yaml",
 		Digest:    digest,
 		Size:      size,
@@ -218,7 +199,7 @@ func updateIndexJSON(cacheDir, digest string, size int64) error {
 	index.Manifests = filteredManifests
 
 	// Write the updated index.json
-	updatedIndexData, err := jsonMarshalIndent(index, "", "  ")
+	updatedIndexData, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshalling updated index.json: %w", err)
 	}
@@ -230,15 +211,10 @@ func updateIndexJSON(cacheDir, digest string, size int64) error {
 	return nil
 }
 
-// UpdateIndexJSONFunc is the function type for updateIndexJSON
-type UpdateIndexJSONFunc func(cacheDir, digest string, size int64) error
-
-// Default implementation for use in tests
-var updateIndexJSONFn UpdateIndexJSONFunc = updateIndexJSON
-
 // Update checks for available updates to the dfc tool
-func Update(ctx context.Context, opts Options) error {
-	fmt.Fprintf(os.Stderr, "Checking for mappings update...\n")
+func Update(ctx context.Context, opts UpdateOptions) error {
+	log := clog.FromContext(ctx)
+	log.Info("Checking for mappings update...")
 
 	// Set default MappingsURL if not provided
 	mappingsURL := opts.MappingsURL
@@ -284,10 +260,7 @@ func Update(ctx context.Context, opts Options) error {
 	digestString := "sha512:" + hashString
 
 	// Get the XDG cache directory
-	cacheDir, err := GetCacheDir()
-	if err != nil {
-		return fmt.Errorf("getting XDG cache directory: %w", err)
-	}
+	cacheDir := getCacheDir()
 
 	// Check if the cache directory exists, if not initialize the OCI layout
 	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
@@ -307,10 +280,7 @@ func Update(ctx context.Context, opts Options) error {
 	if _, err := os.Stat(blobPath); err == nil {
 
 		// Get the XDG config directory for the symlink
-		configDir, err := GetConfigDir()
-		if err != nil {
-			return fmt.Errorf("getting XDG config directory: %w", err)
-		}
+		configDir := getConfigDir()
 
 		// Ensure the nested config directory exists
 		nestedConfigDir := filepath.Join(configDir, OrgName)
@@ -330,11 +300,11 @@ func Update(ctx context.Context, opts Options) error {
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "Already have latest mappings in %s\n", symlinkPath)
+		log.Info("Already have latest mappings", "location", symlinkPath)
 
 	} else {
 
-		fmt.Fprintf(os.Stderr, "Saving latest version of mappings to %s\n", blobPath)
+		log.Info("Saving latest version of mappings", "location", blobPath)
 
 		// Save the mapping file
 		blobsDir := filepath.Join(cacheDir, "blobs", "sha512")
@@ -347,15 +317,12 @@ func Update(ctx context.Context, opts Options) error {
 		}
 
 		// Update the index.json file
-		if err := updateIndexJSONFn(cacheDir, digestString, int64(len(body))); err != nil {
+		if err := updateIndexJSON(cacheDir, digestString, int64(len(body))); err != nil {
 			return fmt.Errorf("updating index.json: %w", err)
 		}
 
 		// Get the XDG config directory for the symlink
-		configDir, err := GetConfigDir()
-		if err != nil {
-			return fmt.Errorf("getting XDG config directory: %w", err)
-		}
+		configDir := getConfigDir()
 
 		// Ensure the nested config directory exists
 		nestedConfigDir := filepath.Join(configDir, OrgName)
@@ -365,7 +332,7 @@ func Update(ctx context.Context, opts Options) error {
 
 		// Create or update the symlink to point to the latest mappings file
 		symlinkPath := filepath.Join(nestedConfigDir, "mappings.yaml")
-		fmt.Fprintf(os.Stderr, "Created symlink to latest mappings at %s\n", symlinkPath)
+		log.Info("Created symlink to latest mappings", "location", symlinkPath)
 
 		// Remove existing symlink if it exists
 		_ = os.Remove(symlinkPath)
@@ -375,7 +342,7 @@ func Update(ctx context.Context, opts Options) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Mappings checksum: sha512:%s\n", hashString)
+	log.Info("Mappings checksum", "sha512", hashString)
 
 	return nil
 }

@@ -8,22 +8,18 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/chainguard-dev/dfc/pkg/dfc"
-	"github.com/chainguard-dev/dfc/pkg/update"
 )
-
-//go:embed mappings.yaml
-var mappingsYamlBytes []byte
 
 var (
 	// Version is the semantic version (added at compile time via -X main.Version=$VERSION)
@@ -34,9 +30,14 @@ var (
 )
 
 func main() {
+	// Set up structured logger
+	log := clog.New(slog.Default().Handler())
+	ctx := clog.WithLogger(context.Background(), log)
+
 	// inspired by https://github.com/jonjohnsonjr/apkrane/blob/main/main.go
-	if err := cli().ExecuteContext(context.Background()); err != nil {
-		log.Fatal(err)
+	if err := cli().ExecuteContext(ctx); err != nil {
+		log.Error("execution failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -63,36 +64,29 @@ func cli() *cobra.Command {
 		Version: v,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			log := clog.FromContext(ctx)
 
-			// Handle update flag
-			if updateFlag {
+			// If update flag is set but no args, just update and exit
+			if updateFlag && len(args) == 0 {
 				// Set up update options
-				updateOpts := update.Options{}
+				updateOpts := dfc.UpdateOptions{}
 
 				// Set UserAgent if version info is available
 				if Version != "" {
 					updateOpts.UserAgent = "dfc/" + Version
 				}
 
-				// If custom mappings file provided, don't use the update URL
-				if mappingsFile != "" {
-					fmt.Printf("Using local mappings file %s instead of remote URL\n", mappingsFile)
-				} else {
-					// Otherwise use the default mappings URL
-					updateOpts.MappingsURL = update.DefaultMappingsURL
-				}
+				// Use the default mappings URL
+				updateOpts.MappingsURL = dfc.DefaultMappingsURL
 
-				if err := update.Update(ctx, updateOpts); err != nil {
+				if err := dfc.Update(ctx, updateOpts); err != nil {
 					return fmt.Errorf("failed to update: %w", err)
 				}
+				return nil
+			}
 
-				// If no args provided, exit after update
-				if len(args) == 0 {
-					return nil
-				}
-				// Otherwise continue with normal flow
-			} else if len(args) == 0 {
-				// If no update flag and no args, require an argument
+			// If no args and no update flag, require an argument
+			if len(args) == 0 {
 				return fmt.Errorf("requires at least 1 arg(s), only received 0")
 			}
 
@@ -121,44 +115,27 @@ func cli() *cobra.Command {
 				return fmt.Errorf("unable to parse dockerfile: %w", err)
 			}
 
-			// Try to parse and merge additional mappings from packages.yaml or custom mappings file
-			var mappings dfc.MappingsConfig
-			var mappingsBytes []byte
-
-			// Use custom mappings file if provided
-			if mappingsFile != "" {
-				var err error
-				mappingsBytes, err = os.ReadFile(mappingsFile)
-				if err != nil {
-					return fmt.Errorf("reading mappings file %s: %w", mappingsFile, err)
-				}
-				log.Printf("using custom mappings file: %s", mappingsFile)
-			} else {
-				// Try to use XDG config mappings file if available
-				xdgMappings, err := update.GetMappingsConfig()
-				if err != nil {
-					return fmt.Errorf("checking XDG config mappings: %w", err)
-				}
-
-				if xdgMappings != nil {
-					log.Printf("using mappings from XDG config directory")
-					mappingsBytes = xdgMappings
-				} else {
-					// Fall back to embedded mappings.yaml
-					log.Printf("using embedded mappings.yaml")
-					mappingsBytes = mappingsYamlBytes
-				}
-			}
-
-			if err := yaml.Unmarshal(mappingsBytes, &mappings); err != nil {
-				return fmt.Errorf("unmarshalling package mappings: %w", err)
-			}
-
 			// Setup conversion options
 			opts := dfc.Options{
 				Organization: org,
 				Registry:     registry,
-				Mappings:     mappings,
+				Update:       updateFlag,
+			}
+
+			// If custom mappings file is provided, load it as ExtraMappings
+			if mappingsFile != "" {
+				log.Info("Loading custom mappings file", "file", mappingsFile)
+				mappingsBytes, err := os.ReadFile(mappingsFile)
+				if err != nil {
+					return fmt.Errorf("reading mappings file %s: %w", mappingsFile, err)
+				}
+
+				var extraMappings dfc.MappingsConfig
+				if err := yaml.Unmarshal(mappingsBytes, &extraMappings); err != nil {
+					return fmt.Errorf("unmarshalling package mappings: %w", err)
+				}
+
+				opts.ExtraMappings = extraMappings
 			}
 
 			// Convert the Dockerfile
@@ -199,11 +176,11 @@ func cli() *cobra.Command {
 				originalMode := fileInfo.Mode().Perm()
 
 				backupPath := path + ".bak"
-				log.Printf("saving dockerfile backup to %s", backupPath)
+				log.Info("Saving dockerfile backup", "path", backupPath)
 				if err := os.WriteFile(backupPath, raw, originalMode); err != nil {
 					return fmt.Errorf("saving dockerfile backup to %s: %w", backupPath, err)
 				}
-				log.Printf("overwriting %s", path)
+				log.Info("Overwriting dockerfile", "path", path)
 				if err := os.WriteFile(path, []byte(result), originalMode); err != nil {
 					return fmt.Errorf("overwriting %s: %w", path, err)
 				}

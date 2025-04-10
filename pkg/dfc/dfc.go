@@ -383,9 +383,10 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 
 // Options defines the configuration options for the conversion
 type Options struct {
-	Organization string
-	Registry     string
-	Mappings     MappingsConfig
+	Organization  string
+	Registry      string
+	ExtraMappings MappingsConfig
+	Update        bool // When true, update cached mappings before conversion
 }
 
 // MappingsConfig represents the structure of mappings.yaml
@@ -410,7 +411,19 @@ func parseImageReference(imageRef string) (base, tag string) {
 }
 
 // Convert applies the conversion to the Dockerfile and returns a new converted Dockerfile
-func (d *Dockerfile) Convert(_ context.Context, opts Options) (*Dockerfile, error) {
+func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, error) {
+	// Load the default mappings
+	defaultMappings, err := GetDefaultMappings(ctx, opts.Update)
+	if err != nil {
+		return nil, fmt.Errorf("loading default mappings: %w", err)
+	}
+
+	// Merge with the extra mappings if provided
+	mappings := defaultMappings
+	if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
+		mappings = MergeMappings(defaultMappings, opts.ExtraMappings)
+	}
+
 	// Create a new Dockerfile for the converted content
 	converted := &Dockerfile{
 		Lines: make([]*DockerfileLine, len(d.Lines)),
@@ -443,20 +456,32 @@ func (d *Dockerfile) Convert(_ context.Context, opts Options) (*Dockerfile, erro
 
 			// Apply FROM line conversion only for non-dynamic bases
 			if shouldConvertFromLine(line.From) {
-				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, opts)
+				// Use the merged mappings for conversion
+				optsWithMappings := Options{
+					Organization:  opts.Organization,
+					Registry:      opts.Registry,
+					ExtraMappings: mappings,
+				}
+				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, optsWithMappings)
 			}
 		}
 
 		// Handle ARG lines that are used as base images
 		if line.Arg != nil && line.Arg.UsedAsBase && line.Arg.DefaultValue != "" {
-			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, opts)
+			// Use the merged mappings for conversion
+			optsWithMappings := Options{
+				Organization:  opts.Organization,
+				Registry:      opts.Registry,
+				ExtraMappings: mappings,
+			}
+			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, optsWithMappings)
 			newLine.Converted = argLine
 			newLine.Arg = argDetails
 		}
 
 		// Process RUN commands
 		if line.Run != nil && line.Run.Shell != nil && line.Run.Shell.Before != nil {
-			processRunLine(newLine, line, stagePackages, opts.Mappings.Packages)
+			processRunLine(newLine, line, stagePackages, mappings.Packages)
 		}
 
 		// Add the converted line to the result
@@ -541,7 +566,7 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	var convertedTag string
 
 	// Check for exact match first
-	if mappedImage, ok := opts.Mappings.Images[baseFilename]; ok {
+	if mappedImage, ok := opts.ExtraMappings.Images[baseFilename]; ok {
 		// Check if the mapped image includes a tag
 		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
 			targetImage = parts[0]
@@ -551,7 +576,7 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 		}
 	} else {
 		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.Mappings.Images {
+		for pattern, mappedImage := range opts.ExtraMappings.Images {
 			if strings.HasSuffix(pattern, "*") {
 				prefix := strings.TrimSuffix(pattern, "*")
 				if strings.HasPrefix(baseFilename, prefix) {
@@ -601,7 +626,7 @@ func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunComma
 	var convertedTag string
 
 	// Check for exact match first
-	if mappedImage, ok := opts.Mappings.Images[baseFilename]; ok {
+	if mappedImage, ok := opts.ExtraMappings.Images[baseFilename]; ok {
 		// Check if the mapped image includes a tag
 		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
 			targetImage = parts[0]
@@ -611,7 +636,7 @@ func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunComma
 		}
 	} else {
 		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.Mappings.Images {
+		for pattern, mappedImage := range opts.ExtraMappings.Images {
 			if strings.HasSuffix(pattern, "*") {
 				prefix := strings.TrimSuffix(pattern, "*")
 				if strings.HasPrefix(baseFilename, prefix) {

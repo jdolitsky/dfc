@@ -16,7 +16,35 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Empty default mappings for tests
+var emptyMappings = MappingsConfig{
+	Images:   map[string]string{},
+	Packages: PackageMap{},
+}
+
+// setupMappingsMock configures the test environment to use empty mappings
+// This should be called at the beginning of each test function
+func setupMappingsMock() func() {
+	// Save the original function
+	originalFunc := getDefaultMappingsFunc
+
+	// Override default mappings function for tests
+	// This avoids filesystem access and network calls during tests
+	getDefaultMappingsFunc = func(ctx context.Context, update bool) (MappingsConfig, error) {
+		return emptyMappings, nil
+	}
+
+	// Return a cleanup function to restore the original behavior if needed
+	return func() {
+		getDefaultMappingsFunc = originalFunc
+	}
+}
+
 func TestParseConvert(t *testing.T) {
+	// Setup mock mappings
+	cleanup := setupMappingsMock()
+	defer cleanup()
+
 	convertTests := []struct {
 		name     string
 		raw      string
@@ -1162,7 +1190,7 @@ FROM ${BASE_IMAGE} AS base`,
 			}
 
 			converted, err := parsed.Convert(ctx, Options{
-				Mappings: MappingsConfig{
+				ExtraMappings: MappingsConfig{
 					Images: map[string]string{
 						"debian": DefaultChainguardBase + ":latest",
 					},
@@ -1172,6 +1200,7 @@ FROM ${BASE_IMAGE} AS base`,
 						},
 					},
 				},
+				Update: false,
 			})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
@@ -1185,6 +1214,10 @@ FROM ${BASE_IMAGE} AS base`,
 
 // TestFullFileConversion checks that .before. Dockerfiles convert to .after. Dockerfiles
 func TestFullFileConversion(t *testing.T) {
+	// Setup mock mappings
+	cleanup := setupMappingsMock()
+	defer cleanup()
+
 	// Find all .before.Dockerfile files in the testdata directory
 	beforeFiles, err := filepath.Glob("../../testdata/*.before.Dockerfile")
 	if err != nil {
@@ -1237,7 +1270,8 @@ func TestFullFileConversion(t *testing.T) {
 				t.Fatalf("Failed to parse Dockerfile: %v", err)
 			}
 			converted, err := orig.Convert(ctx, Options{
-				Mappings: mappingsConfig,
+				ExtraMappings: mappingsConfig,
+				Update:        false,
 			})
 			if err != nil {
 				t.Fatalf("Failed to convert Dockerfile: %v", err)
@@ -1254,6 +1288,10 @@ func TestFullFileConversion(t *testing.T) {
 }
 
 func TestDoubleConversionUserRoot(t *testing.T) {
+	// Setup mock mappings
+	cleanup := setupMappingsMock()
+	defer cleanup()
+
 	// Create a simple Dockerfile with a FROM and RUN instruction
 	content := `FROM python:3.9
 RUN apt-get update && apt-get install -y nano`
@@ -1268,13 +1306,14 @@ RUN apt-get update && apt-get install -y nano`
 
 	// Create options
 	opts := Options{
-		Mappings: MappingsConfig{
+		ExtraMappings: MappingsConfig{
 			Packages: PackageMap{
 				DistroDebian: {
 					"nano": []string{"nano"},
 				},
 			},
 		},
+		Update: false,
 	}
 
 	// First conversion

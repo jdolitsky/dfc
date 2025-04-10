@@ -362,6 +362,8 @@ func main() {
 	// Convert
 	converted, err := dockerfile.Convert(ctx, dfc.Options{
 		Organization: org,
+		// Update: true,                  // Optional: update mappings before conversion
+		// ExtraMappings: myCustomMappings, // Optional: overlay custom mappings on top of default mappings
 	})
 	if err != nil {
 		log.Fatalf("dockerfile.Convert(): %v", err)
