@@ -585,8 +585,19 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	targetImage := baseFilename
 	var convertedTag string
 
+	// Check for exact match first, in specific order
+	// TODO: support index.docker.io etc. based on the base
+	var mappedImage string
+	lookups := []string{base, baseFilename}
+	for _, lookup := range lookups {
+		var ok bool
+		if mappedImage, ok = opts.ExtraMappings.Images[lookup]; ok {
+			break
+		}
+	}
+
 	// Check for exact match first
-	if mappedImage, ok := opts.ExtraMappings.Images[baseFilename]; ok {
+	if mappedImage != "" {
 		// Check if the mapped image includes a tag
 		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
 			targetImage = parts[0]
