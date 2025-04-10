@@ -123,9 +123,9 @@ By default, custom mappings specified with `--mappings` will overlay the built-i
 dfc --mappings="./custom-mappings.yaml" --no-builtin ./Dockerfile
 ```
 
-### Updating Mappings
+### Updating Built-in Mappings
 
-The `--update` flag is used to update the cached mappings from the latest version available in the repository:
+The `--update` flag is used to update the built-in mappings in a local cache from the latest version available in the repository:
 
 ```sh
 dfc --update
@@ -139,7 +139,7 @@ dfc --update ./Dockerfile
 
 When combined with a conversion command, the update check is performed prior to running the conversion, ensuring your conversions use the most up-to-date mappings available.
 
-### Submitting New Mappings
+### Submitting New Built-in Mappings
 
 If you'd like to request new mappings to be added to the built-in mappings file, please [open a GitHub issue](https://github.com/chainguard-dev/dfc/issues/new?template=BLANK_ISSUE).
 
