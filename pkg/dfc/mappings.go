@@ -45,18 +45,18 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 	}
 
 	// Try to use XDG config mappings file if available
-	xdgMappings, err := GetMappingsConfig()
+	xdgMappings, err := getMappingsConfig()
 	if err != nil {
 		return mappings, fmt.Errorf("checking XDG config mappings: %w", err)
 	}
 
 	var mappingsBytes []byte
 	if xdgMappings != nil {
-		log.Info("Using mappings from XDG config directory")
+		log.Debug("Using mappings from XDG config directory")
 		mappingsBytes = xdgMappings
 	} else {
 		// Fall back to embedded mappings
-		log.Info("Using embedded builtin mappings")
+		log.Debug("Using embedded builtin mappings")
 		mappingsBytes = builtinMappingsYAMLBytes
 	}
 

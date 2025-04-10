@@ -199,7 +199,7 @@ func TestGetMappingsConfig(t *testing.T) {
 	_, _, configDir, _ := setupTestEnvironment(t)
 
 	// Test when file doesn't exist
-	mappings, err := GetMappingsConfig()
+	mappings, err := getMappingsConfig()
 	if err != nil {
 		t.Fatalf("GetMappingsConfig() error = %v when file doesn't exist", err)
 	}
@@ -217,7 +217,7 @@ func TestGetMappingsConfig(t *testing.T) {
 	}
 
 	// Test when file exists
-	mappings, err = GetMappingsConfig()
+	mappings, err = getMappingsConfig()
 	if err != nil {
 		t.Fatalf("GetMappingsConfig() error = %v when file exists", err)
 	}

@@ -86,8 +86,8 @@ func getMappingsConfigPath() (string, error) {
 	return mappingsPath, nil
 }
 
-// GetMappingsConfig reads and returns the contents of the mappings.yaml file
-func GetMappingsConfig() ([]byte, error) {
+// getMappingsConfig reads and returns the contents of the mappings.yaml file
+func getMappingsConfig() ([]byte, error) {
 	mappingsPath, err := getMappingsConfigPath()
 	if err != nil {
 		return nil, err
