@@ -78,7 +78,7 @@ func cli() *cobra.Command {
 
 			// If input is not specified, use the default builtin-mappings.yaml
 			if input == "" {
-				input = "pkg/dfc/builtin-mappings.yaml"
+				input = "builtin-mappings.yaml"
 				log.Info("Using default input file", "path", input)
 			}
 
@@ -146,7 +146,7 @@ func cli() *cobra.Command {
 				defer cleanupFunc()
 
 				// Generate the database from the current YAML
-				if err := dfc.CreateDBFromYAML(ctx, "pkg/dfc/builtin-mappings.yaml", tempFile); err != nil {
+				if err := dfc.CreateDBFromYAML(ctx, "builtin-mappings.yaml", tempFile); err != nil {
 					return fmt.Errorf("generating temporary database: %w", err)
 				}
 				check = tempFile
@@ -175,9 +175,61 @@ func cli() *cobra.Command {
 	verifyDBCmd.Flags().String("reference", "", "Reference database file (default: pkg/dfc/builtin-mappings.db)")
 	verifyDBCmd.Flags().String("check", "", "Database file to check (default: generate from current YAML)")
 
+	// Add the export-yaml command
+	exportYAMLCmd := &cobra.Command{
+		Use:     "export-yaml",
+		Short:   "Export SQLite database to YAML file",
+		Args:    cobra.NoArgs,
+		PreRunE: setupLogging(&level),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			log := clog.FromContext(ctx)
+
+			// Get the input and output flags
+			input, _ := cmd.Flags().GetString("input")
+			output, _ := cmd.Flags().GetString("output")
+
+			// If input is not specified, use the default builtin-mappings.db
+			if input == "" {
+				input = "pkg/dfc/builtin-mappings.db"
+				log.Info("Using default input file", "path", input)
+			}
+
+			// If output is not specified, use the default builtin-mappings.yaml
+			if output == "" {
+				output = "builtin-mappings.yaml"
+				log.Info("Using default output file", "path", output)
+			}
+
+			// Check if the input file exists
+			if _, err := os.Stat(input); os.IsNotExist(err) {
+				return fmt.Errorf("input file does not exist: %s", input)
+			}
+
+			// Create the output directory if it does not exist
+			outputDir := filepath.Dir(output)
+			if err := os.MkdirAll(outputDir, 0755); err != nil {
+				return fmt.Errorf("creating output directory: %w", err)
+			}
+
+			// Export the database to YAML
+			if err := dfc.ExportDBToYAML(ctx, input, output); err != nil {
+				return fmt.Errorf("exporting database: %w", err)
+			}
+
+			log.Info("YAML file generated successfully", "output", output)
+			return nil
+		},
+	}
+
+	// Setup flags for export-yaml command
+	exportYAMLCmd.Flags().StringP("input", "i", "", "Input SQLite database path (default: pkg/dfc/builtin-mappings.db)")
+	exportYAMLCmd.Flags().StringP("output", "o", "", "Output YAML file path (default: builtin-mappings.yaml)")
+
 	// Add commands to root
 	rootCmd.AddCommand(genDBCmd)
 	rootCmd.AddCommand(verifyDBCmd)
+	rootCmd.AddCommand(exportYAMLCmd)
 
 	return rootCmd
 }

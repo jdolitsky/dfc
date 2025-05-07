@@ -7,16 +7,11 @@ package dfc
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"os"
 
 	"github.com/chainguard-dev/clog"
-	"gopkg.in/yaml.v3"
 )
-
-//go:embed builtin-mappings.yaml
-var builtinMappingsYAMLBytes []byte
 
 // defaultGetDefaultMappings is the real implementation of GetDefaultMappings
 func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig, error) {
@@ -35,49 +30,64 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 		}
 	}
 
-	// First try to use SQLite database if available
+	// Try to use SQLite database
 	dbPath, err := getDBPath()
-	if err == nil {
-		// Check if the database file exists
-		if fileExists(dbPath) {
-			log.Debug("Using SQLite database from config directory")
-			db, err := OpenDB(ctx)
+	if err == nil && fileExists(dbPath) {
+		log.Debug("Using SQLite database from config directory")
+		db, err := OpenDB(ctx)
+		if err == nil {
+			defer db.Close()
+			mappings, err := LoadMappingsFromDB(ctx, db)
 			if err == nil {
-				defer db.Close()
-				mappings, err := LoadMappingsFromDB(ctx, db)
-				if err == nil {
-					return mappings, nil
-				}
-				log.Warn("Failed to load mappings from database, will try YAML", "error", err)
-			} else {
-				log.Warn("Failed to open database, will try YAML", "error", err)
+				return mappings, nil
 			}
+			log.Warn("Failed to load mappings from database", "error", err)
+		} else {
+			log.Warn("Failed to open database", "error", err)
 		}
-	}
-
-	// Fall back to YAML if database is not available or has errors
-	// Try to use XDG config mappings file if available
-	xdgMappings, err := getMappingsConfig()
-	if err != nil {
-		return mappings, fmt.Errorf("checking XDG config mappings: %w", err)
-	}
-
-	var mappingsBytes []byte
-	if xdgMappings != nil {
-		log.Debug("Using YAML mappings from XDG config directory")
-		mappingsBytes = xdgMappings
 	} else {
-		// Fall back to embedded mappings
-		log.Debug("Using embedded builtin mappings (YAML)")
-		mappingsBytes = builtinMappingsYAMLBytes
+		// In test mode, try to load the embedded database directly
+		log.Debug("Trying to load embedded database directly")
+		dbBytes, err := getEmbeddedDBBytes()
+		if err != nil {
+			return mappings, fmt.Errorf("failed to load embedded database: %w", err)
+		}
+
+		// Create a temporary file for the database
+		tmpFile, err := os.CreateTemp("", "dfc-embedded-db-*.db")
+		if err != nil {
+			return mappings, fmt.Errorf("failed to create temp file for database: %w", err)
+		}
+		defer os.Remove(tmpFile.Name())
+		defer tmpFile.Close()
+
+		// Write the embedded database to the temporary file
+		if _, err := tmpFile.Write(dbBytes); err != nil {
+			return mappings, fmt.Errorf("failed to write embedded database to temp file: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			return mappings, fmt.Errorf("failed to close temp file: %w", err)
+		}
+
+		// Open the database
+		db, err := OpenDB(ctx, tmpFile.Name())
+		if err != nil {
+			return mappings, fmt.Errorf("failed to open embedded database: %w", err)
+		}
+		defer db.Close()
+
+		// Load the mappings
+		mappings, err = LoadMappingsFromDB(ctx, db)
+		if err != nil {
+			return mappings, fmt.Errorf("failed to load mappings from embedded database: %w", err)
+		}
+
+		return mappings, nil
 	}
 
-	// Unmarshal the mappings
-	if err := yaml.Unmarshal(mappingsBytes, &mappings); err != nil {
-		return mappings, fmt.Errorf("unmarshalling mappings: %w", err)
-	}
-
-	return mappings, nil
+	// If we get here, we couldn't load from database, which is a critical error
+	// since YAML is no longer embedded
+	return mappings, fmt.Errorf("failed to load mappings from database, and YAML fallback is no longer supported")
 }
 
 // fileExists returns true if the file exists

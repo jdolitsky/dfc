@@ -450,3 +450,39 @@ func CompareDBFiles(ctx context.Context, path1, path2 string) (bool, error) {
 	log.Debug("Database content matches")
 	return true, nil
 }
+
+// ExportDBToYAML exports the contents of a SQLite database to a YAML file
+func ExportDBToYAML(ctx context.Context, dbPath, yamlPath string) error {
+	log := clog.FromContext(ctx)
+	log.Info("Exporting database to YAML file", "db", dbPath, "yaml", yamlPath)
+
+	// Open the database
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		return fmt.Errorf("opening db: %w", err)
+	}
+	defer db.Close()
+
+	// Wrap the connection
+	dbConn := &DBConnection{db}
+
+	// Load mappings from the database
+	mappings, err := LoadMappingsFromDB(ctx, dbConn)
+	if err != nil {
+		return fmt.Errorf("loading mappings from db: %w", err)
+	}
+
+	// Marshal to YAML
+	yamlData, err := yaml.Marshal(mappings)
+	if err != nil {
+		return fmt.Errorf("marshalling to YAML: %w", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(yamlPath, yamlData, 0600); err != nil {
+		return fmt.Errorf("writing YAML file: %w", err)
+	}
+
+	log.Info("Database exported to YAML successfully")
+	return nil
+}

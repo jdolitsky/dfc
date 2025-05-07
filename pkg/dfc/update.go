@@ -37,9 +37,6 @@ type UpdateOptions struct {
 
 	// MappingsURL is the URL to fetch the latest mappings from
 	MappingsURL string
-
-	// UseDB indicates whether to use the .db file instead of .yaml
-	UseDB bool
 }
 
 // ociLayout represents the oci-layout file
@@ -254,30 +251,29 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		return fmt.Errorf("updating YAML mappings: %w", err)
 	}
 
-	// If UseDB flag is true, also update the DB file
-	if opts.UseDB {
-		// Derive the DB URL from the YAML URL (replace .yaml with .db)
-		dbURL := strings.TrimSuffix(mappingsURL, ".yaml") + ".db"
-		if err := updateDatabaseFile(ctx, dbURL, opts.UserAgent); err != nil {
-			log.Warn("Failed to update database file, will try to generate from YAML", "error", err)
-
-			// Fall back to generating the DB from the updated YAML
-			yamlPath, err := getMappingsConfigPath()
-			if err != nil {
-				return fmt.Errorf("getting YAML path: %w", err)
-			}
-
-			dbPath, err := getDBPath()
-			if err != nil {
-				return fmt.Errorf("getting DB path: %w", err)
-			}
-
-			log.Info("Generating database from updated YAML file")
-			if err := CreateDBFromYAML(ctx, yamlPath, dbPath); err != nil {
-				log.Warn("Failed to generate database from YAML", "error", err)
-				// Continue without error, will fall back to YAML
-			}
+	// Always update the DB file
+	// Derive the DB URL from the YAML URL
+	var dbURL string
+	if strings.Contains(mappingsURL, ".yaml") {
+		// If URL has .yaml extension, replace it with .db
+		dbURL = strings.TrimSuffix(mappingsURL, ".yaml") + ".db"
+	} else {
+		// If URL has no extension, append /builtin-mappings.db or just .db based on the path
+		if strings.HasSuffix(mappingsURL, "/") {
+			dbURL = mappingsURL + "builtin-mappings.db"
+		} else if strings.Contains(mappingsURL, "/") && !strings.Contains(filepath.Base(mappingsURL), ".") {
+			// URL has a path but no file extension
+			dbURL = mappingsURL + "/builtin-mappings.db"
+		} else {
+			// URL is just a domain or has a specific file without extension
+			dbURL = mappingsURL + ".db"
 		}
+	}
+
+	log.Debug("Using database URL", "url", dbURL)
+
+	if err := updateDatabaseFile(ctx, dbURL, opts.UserAgent); err != nil {
+		return fmt.Errorf("updating database file: %w", err)
 	}
 
 	return nil

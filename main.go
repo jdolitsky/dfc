@@ -53,7 +53,6 @@ func cli() *cobra.Command {
 	var mappingsFile string
 	var updateFlag bool
 	var noBuiltInFlag bool
-	var useDBFlag bool
 
 	// Default log level is info
 	var level = slag.Level(slog.LevelInfo)
@@ -80,9 +79,7 @@ func cli() *cobra.Command {
 			// If update flag is set but no args, just update and exit
 			if updateFlag && len(args) == 0 {
 				// Set up update options
-				updateOpts := dfc.UpdateOptions{
-					UseDB: useDBFlag,
-				}
+				updateOpts := dfc.UpdateOptions{}
 
 				// Set UserAgent if version info is available
 				if Version != "" {
@@ -217,7 +214,6 @@ func cli() *cobra.Command {
 	cmd.Flags().StringVarP(&mappingsFile, "mappings", "m", "", "path to a custom package mappings YAML file (instead of the default)")
 	cmd.Flags().BoolVar(&updateFlag, "update", false, "check for and apply available updates")
 	cmd.Flags().BoolVar(&noBuiltInFlag, "no-builtin", false, "skip built-in package/image mappings, still apply default conversion logic")
-	cmd.Flags().BoolVar(&useDBFlag, "use-db", true, "use SQLite database for mappings (instead of YAML)")
 	cmd.Flags().Var(&level, "log-level", "log level (e.g. debug, info, warn, error)")
 
 	return cmd

@@ -77,6 +77,19 @@ func setupTestServer(t *testing.T) *httptest.Server {
 			return
 		}
 
+		// Also serve the .db file
+		if r.URL.Path == "/builtin-mappings.db" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			// For testing purposes, just serve a simple mock database
+			// This doesn't need to be a valid SQLite file for the tests
+			_, err := w.Write([]byte("MOCK_DATABASE_CONTENT"))
+			if err != nil {
+				t.Fatalf("Failed to write response: %v", err)
+			}
+			return
+		}
+
 		// Return 404 for any other paths
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -350,14 +363,18 @@ func TestUpdateWithCancelledContext(t *testing.T) {
 func TestUpdateEmptyBody(t *testing.T) {
 	setupTestEnvironment(t)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		// Write an empty body
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/builtin-mappings.yaml" || r.URL.Path == "/builtin-mappings.db" {
+			w.WriteHeader(http.StatusOK)
+			// Write an empty body
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 
 	opts := UpdateOptions{
-		MappingsURL: server.URL,
+		MappingsURL: server.URL + "/builtin-mappings.yaml",
 	}
 
 	err := Update(context.Background(), opts)
@@ -424,11 +441,22 @@ func TestUpdateWithCustomUserAgent(t *testing.T) {
 	var receivedUserAgent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedUserAgent = r.Header.Get("User-Agent")
-		w.Header().Set("Content-Type", "text/yaml")
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte(testMappingsYAML))
-		if err != nil {
-			t.Fatalf("Failed to write response: %v", err)
+		if r.URL.Path == "/builtin-mappings.yaml" {
+			w.Header().Set("Content-Type", "text/yaml")
+			w.WriteHeader(http.StatusOK)
+			_, err := w.Write([]byte(testMappingsYAML))
+			if err != nil {
+				t.Fatalf("Failed to write response: %v", err)
+			}
+		} else if r.URL.Path == "/builtin-mappings.db" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, err := w.Write([]byte("MOCK_DATABASE_CONTENT"))
+			if err != nil {
+				t.Fatalf("Failed to write response: %v", err)
+			}
+		} else {
+			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer server.Close()
@@ -436,7 +464,7 @@ func TestUpdateWithCustomUserAgent(t *testing.T) {
 	// Update with custom UserAgent
 	customUserAgent := "dfc/test-version"
 	opts := UpdateOptions{
-		MappingsURL: server.URL,
+		MappingsURL: server.URL + "/builtin-mappings.yaml",
 		UserAgent:   customUserAgent,
 	}
 
