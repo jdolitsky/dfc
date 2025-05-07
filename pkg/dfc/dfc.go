@@ -8,10 +8,14 @@ package dfc
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/chainguard-dev/clog"
 )
 
 // Distro represents a Linux distribution
@@ -430,7 +434,7 @@ type PackageMap map[Distro]map[string][]string
 //	})
 type FromLineConverter func(from *FromDetails, converted string, stageHasRun bool) (string, error)
 
-// Options defines the configuration options for the conversion
+// Options configures the conversion
 type Options struct {
 	Organization      string
 	Registry          string
@@ -438,6 +442,7 @@ type Options struct {
 	Update            bool              // When true, update cached mappings before conversion
 	NoBuiltIn         bool              // When true, don't use built-in mappings, only ExtraMappings
 	FromLineConverter FromLineConverter // Optional custom converter for FROM lines
+	MappingProvider   MappingProvider   // Provider for image/package mappings (overrides ExtraMappings if provided)
 }
 
 // MappingsConfig represents the structure of builtin-mappings.yaml
@@ -460,34 +465,98 @@ func parseImageReference(imageRef string) (base, tag string) {
 
 // Convert applies the conversion to the Dockerfile and returns a new converted Dockerfile
 func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, error) {
-	// Initialize mappings
-	var mappings MappingsConfig
+	log := clog.FromContext(ctx)
 
-	// Handle mappings based on options
-	if !opts.NoBuiltIn {
-		// Load the default mappings (unless NoBuiltIn is true)
-		defaultMappings, err := defaultGetDefaultMappings(ctx, opts.Update)
-		if err != nil {
-			return nil, fmt.Errorf("loading default mappings: %w", err)
-		}
+	// Set up the MappingProvider
+	var provider MappingProvider
 
-		// Use default mappings
-		mappings = defaultMappings
-
-		// Merge with the extra mappings if provided
-		if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
-			mappings = MergeMappings(defaultMappings, opts.ExtraMappings)
-		}
+	// If a provider is already set, use it directly
+	if opts.MappingProvider != nil {
+		provider = opts.MappingProvider
 	} else {
-		// NoBuiltIn is true, use only ExtraMappings if provided
-		// Otherwise, use empty mappings
-		mappings = opts.ExtraMappings
-		// Initialize empty maps if they don't exist
-		if mappings.Images == nil {
-			mappings.Images = make(map[string]string)
+		// Otherwise, create providers based on options
+		var providers []MappingProvider
+
+		// Handle mappings based on options
+		if !opts.NoBuiltIn {
+			// First try to get a DB connection
+			var dbConnection *DBConnection
+
+			// If update is requested, try to update the mappings first
+			if opts.Update {
+				updateOpts := UpdateOptions{}
+				updateOpts.MappingsURL = defaultMappingsURL
+
+				if err := Update(ctx, updateOpts); err != nil {
+					log.Warn("Failed to update mappings, will try to use existing mappings", "error", err)
+				}
+			}
+
+			// Try to open the database from XDG config directory
+			dbPath, err := getDBPath()
+			if err == nil && fileExists(dbPath) {
+				log.Debug("Using SQLite database from config directory")
+				db, err := OpenDB(ctx)
+				if err == nil {
+					// Keep the DB connection open for the duration of the conversion
+					dbConnection = db
+					// Add the DB provider first (higher priority)
+					providers = append(providers, NewDBMappingProvider(db))
+				} else {
+					log.Warn("Failed to open database from config directory", "error", err)
+				}
+			}
+
+			// If we couldn't open the DB from config, try the embedded DB
+			if dbConnection == nil {
+				log.Debug("Trying to load embedded database")
+				dbBytes, err := getEmbeddedDBBytes()
+				if err != nil {
+					log.Warn("Failed to load embedded database", "error", err)
+				} else {
+					// Create a temporary file for the database
+					tmpFile, err := os.CreateTemp("", "dfc-embedded-db-*.db")
+					if err != nil {
+						log.Warn("Failed to create temp file for database", "error", err)
+					} else {
+						tempPath := tmpFile.Name()
+						// Make sure to clean up when we're done
+						defer os.Remove(tempPath)
+
+						// Write the embedded database to the temporary file
+						if _, err := tmpFile.Write(dbBytes); err != nil {
+							log.Warn("Failed to write embedded database to temp file", "error", err)
+						} else if err := tmpFile.Close(); err != nil {
+							log.Warn("Failed to close temp file", "error", err)
+						} else {
+							// Open the database
+							db, err := OpenDB(ctx, tempPath)
+							if err != nil {
+								log.Warn("Failed to open embedded database", "error", err)
+							} else {
+								// Keep the connection open for the duration of the conversion
+								dbConnection = db
+								// Add the DB provider first (higher priority)
+								providers = append(providers, NewDBMappingProvider(db))
+							}
+						}
+					}
+				}
+			}
 		}
-		if mappings.Packages == nil {
-			mappings.Packages = make(PackageMap)
+
+		// If extra mappings are provided, add them as a provider
+		if len(opts.ExtraMappings.Images) > 0 || len(opts.ExtraMappings.Packages) > 0 {
+			// Add the in-memory provider (lower priority if we also have a DB provider)
+			providers = append(providers, NewInMemoryMappingProvider(opts.ExtraMappings))
+		}
+
+		// Create the chained provider from all available providers
+		if len(providers) > 0 {
+			provider = NewChainedMappingProvider(providers...)
+		} else if !opts.NoBuiltIn {
+			// This is unexpected - we should have at least the embedded DB
+			return nil, fmt.Errorf("failed to initialize any mapping providers")
 		}
 	}
 
@@ -523,34 +592,34 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 
 			// Apply FROM line conversion only for non-dynamic bases
 			if shouldConvertFromLine(line.From) {
-				// Use the merged mappings for conversion
-				optsWithMappings := Options{
+				// Use the provider for conversion if available
+				optsWithProvider := Options{
 					Organization:      opts.Organization,
 					Registry:          opts.Registry,
-					ExtraMappings:     mappings,
+					MappingProvider:   provider,
 					FromLineConverter: opts.FromLineConverter,
 				}
-				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, optsWithMappings)
+				newLine.Converted = convertFromLine(ctx, line.From, line.Stage, stagesWithRunCommands, optsWithProvider)
 			}
 		}
 
 		// Handle ARG lines that are used as base images
 		if line.Arg != nil && line.Arg.UsedAsBase && line.Arg.DefaultValue != "" {
-			// Use the merged mappings for conversion
-			optsWithMappings := Options{
+			// Use the provider for conversion
+			optsWithProvider := Options{
 				Organization:      opts.Organization,
 				Registry:          opts.Registry,
-				ExtraMappings:     mappings,
+				MappingProvider:   provider,
 				FromLineConverter: opts.FromLineConverter,
 			}
-			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, optsWithMappings)
+			argLine, argDetails := convertArgLine(ctx, line.Arg, d.Lines, stagesWithRunCommands, optsWithProvider)
 			newLine.Converted = argLine
 			newLine.Arg = argDetails
 		}
 
 		// Process RUN commands
 		if line.Run != nil && line.Run.Shell != nil && line.Run.Shell.Before != nil {
-			processRunLine(newLine, line, stagePackages, mappings.Packages)
+			processRunLine(ctx, newLine, line, stagePackages, provider)
 		}
 
 		// Add the converted line to the result
@@ -620,7 +689,9 @@ func copyFromDetails(from *FromDetails) *FromDetails {
 }
 
 // convertFromLine handles converting a FROM line
-func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int]bool, opts Options) string {
+func convertFromLine(ctx context.Context, from *FromDetails, stage int, stagesWithRunCommands map[int]bool, opts Options) string {
+	log := clog.FromContext(ctx)
+
 	// First, always do the default Chainguard conversion
 	// Determine if we need the -dev suffix
 	needsDevSuffix := stagesWithRunCommands[stage]
@@ -636,66 +707,56 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	targetImage := baseFilename
 	var convertedTag string
 
-	// Check for exact match first, in specific order
-	// For example, if the mapping is just node, it should match all of the following:
-	// FROM registry-1.docker.io/library/node
-	// FROM docker.io/node
-	// FROM docker.io/library/node
-	// FROM index.docker.io/node
-	// FROM index.docker.io/library/node
-	//
-	// If the mapping is someorg/somerepo, it should match all of the following:
-	// FROM registry-1.docker.io/someorg/somerepo
-	// FROM docker.io/someorg/somerepo
-	// FROM index.docker.io/someorg/somerepo
-	var mappedImage string
+	// Use the mapping provider if available
+	if opts.MappingProvider != nil {
+		// Try to find mappings for this image
+		variants := generateDockerHubVariants(base)
+		variants = append([]string{base}, variants...)
 
-	// First check for exact match with full image reference including tag
-	fullImageRef := base
-	if tag != "" {
-		fullImageRef += ":" + tag
-	}
-	if img, ok := opts.ExtraMappings.Images[fullImageRef]; ok {
-		mappedImage = img
-	} else if img, ok := opts.ExtraMappings.Images[base]; ok {
-		mappedImage = img
-	} else if img, ok := opts.ExtraMappings.Images[baseFilename]; ok {
-		mappedImage = img
-	} else {
-		// Generate all possible variants for the base image
-		baseVariants := generateDockerHubVariants(base)
+		for _, variant := range variants {
+			if variant == "" {
+				continue
+			}
 
-		// Check if any variant matches a key in the mappings
-		for _, variant := range baseVariants {
-			if img, ok := opts.ExtraMappings.Images[variant]; ok {
-				mappedImage = img
+			target, found, err := opts.MappingProvider.GetImageMapping(ctx, variant)
+			if err != nil {
+				log.Warn("Error looking up image mapping", "source", variant, "error", err)
+				continue
+			}
+
+			if found {
+				log.Debug("Found image mapping", "source", variant, "target", target)
+				targetImage = target
 				break
 			}
 		}
+	} else if opts.ExtraMappings.Images != nil {
+		// Check for exact match in ExtraMappings
+		if target, ok := opts.ExtraMappings.Images[base]; ok {
+			log.Debug("Found exact image mapping in legacy mappings", "source", base, "target", target)
+			targetImage = target
+		} else {
+			// Try normalize name (Docker Hub variants)
+			for _, variant := range generateDockerHubVariants(base) {
+				if variant == "" {
+					continue
+				}
 
-		// If still no match, try to normalize the base and check against simple keys
-		if mappedImage == "" {
-			normalizedBase := normalizeImageName(base)
-
-			// Check if the normalized base matches any key
-			if img, ok := opts.ExtraMappings.Images[normalizedBase]; ok {
-				mappedImage = img
-			} else if strings.HasPrefix(normalizedBase, "library/") {
-				// Try removing library/ prefix if it exists
-				simpleBase := strings.TrimPrefix(normalizedBase, "library/")
-				if img, ok := opts.ExtraMappings.Images[simpleBase]; ok {
-					mappedImage = img
+				if target, ok := opts.ExtraMappings.Images[variant]; ok {
+					log.Debug("Found normalized image mapping in legacy mappings", "source", variant, "target", target)
+					targetImage = target
+					break
 				}
 			}
-		}
 
-		// If still no match, check for glob patterns with asterisks
-		if mappedImage == "" {
-			for pattern, img := range opts.ExtraMappings.Images {
-				if strings.HasSuffix(pattern, "*") {
-					prefix := strings.TrimSuffix(pattern, "*")
-					if strings.HasPrefix(baseFilename, prefix) {
-						mappedImage = img
+			// Try wildcard match
+			for mappingBase, mappingTarget := range opts.ExtraMappings.Images {
+				if strings.Contains(mappingBase, "*") {
+					pattern := strings.ReplaceAll(mappingBase, "*", ".*")
+					matched, _ := regexp.MatchString("^"+pattern+"$", base)
+					if matched {
+						log.Debug("Found wildcard image mapping in legacy mappings", "pattern", mappingBase, "source", base, "target", mappingTarget)
+						targetImage = mappingTarget
 						break
 					}
 				}
@@ -703,141 +764,78 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 		}
 	}
 
-	// Process the mapped image if found
-	if mappedImage != "" {
-		// Check if the mapped image includes a tag
-		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-			targetImage = parts[0]
-			convertedTag = parts[1]
-		} else {
-			targetImage = mappedImage
-		}
+	// Calculate the tag if needed
+	if tag != "" && !from.TagDynamic {
+		convertedTag = calculateConvertedTag(baseFilename, tag, from.TagDynamic, needsDevSuffix)
+	} else if needsDevSuffix {
+		convertedTag = "latest-dev"
+	} else {
+		convertedTag = "latest"
 	}
 
-	// If targetTag is not specified in mapping, calculate it using the existing logic
-	if convertedTag == "" {
-		convertedTag = calculateConvertedTag(targetImage, tag, from.TagDynamic, needsDevSuffix)
+	// Build the full image reference
+	imageRef := buildImageReference(targetImage, convertedTag, opts)
+
+	// Add the digest if present
+	if from.Digest != "" {
+		imageRef += "@" + from.Digest
 	}
 
-	// Build the image reference
-	chainguardImageRef := buildImageReference(targetImage, convertedTag, opts)
-
-	// Now, if a custom converter is provided, let it process the result
-	if opts.FromLineConverter != nil {
-		customImageRef, err := opts.FromLineConverter(from, chainguardImageRef, stagesWithRunCommands[stage])
-		if err != nil {
-			// If an error occurs, still return a valid FROM line using the original image
-			fromLine := DirectiveFrom + " " + from.Orig
-			if from.Alias != "" {
-				fromLine += " " + KeywordAs + " " + from.Alias
-			}
-			return fromLine
-		}
-
-		// Create the converted FROM line with the custom image
-		fromLine := DirectiveFrom + " " + customImageRef
-		if from.Alias != "" {
-			fromLine += " " + KeywordAs + " " + from.Alias
-		}
-		return fromLine
-	}
-
-	// If no custom converter, use the Chainguard converted reference
-	fromLine := DirectiveFrom + " " + chainguardImageRef
+	// Add the alias if present
 	if from.Alias != "" {
-		fromLine += " " + KeywordAs + " " + from.Alias
+		imageRef += " AS " + from.Alias
 	}
 
-	return fromLine
+	// Apply custom FROM line conversion if provided
+	if opts.FromLineConverter != nil {
+		converted, err := opts.FromLineConverter(from, imageRef, needsDevSuffix)
+		if err != nil {
+			log.Warn("Error applying custom FROM line conversion", "error", err)
+		} else if converted != "" {
+			log.Debug("Applied custom FROM line conversion", "original", imageRef, "converted", converted)
+			return converted
+		}
+	}
+
+	return imageRef
 }
 
-// convertArgLine handles converting an ARG line used as base image
-func convertArgLine(arg *ArgDetails, lines []*DockerfileLine, stagesWithRunCommands map[int]bool, opts Options) (string, *ArgDetails) {
-	// Create a FromDetails structure from the ARG default value
-	base, tag := parseImageReference(arg.DefaultValue)
-
-	// Create a FromDetails to represent this ARG value as a FROM line
-	fromDetails := &FromDetails{
-		Base: base,
-		Tag:  tag,
-		Orig: arg.DefaultValue,
-	}
-
-	// Determine if we need the -dev suffix
-	needsDevSuffix := determineIfArgNeedsDevSuffix(arg.Name, lines, stagesWithRunCommands)
-
-	// First perform the default Chainguard conversion
-	// Calculate default image reference using common approach
-	baseFilename := filepath.Base(base)
-
-	// Get the appropriate Chainguard image name using mappings
-	targetImage := baseFilename
-	var convertedTag string
-
-	// Check for exact match first
-	if mappedImage, ok := opts.ExtraMappings.Images[baseFilename]; ok {
-		// Check if the mapped image includes a tag
-		if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-			targetImage = parts[0]
-			convertedTag = parts[1]
-		} else {
-			targetImage = mappedImage
-		}
-	} else {
-		// No exact match, check for glob patterns with asterisks
-		for pattern, mappedImage := range opts.ExtraMappings.Images {
-			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
-				if strings.HasPrefix(baseFilename, prefix) {
-					// Found a match with a glob pattern
-					if parts := strings.Split(mappedImage, ":"); len(parts) > 1 {
-						targetImage = parts[0]
-						convertedTag = parts[1]
-					} else {
-						targetImage = mappedImage
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// If targetTag is not specified in mapping, calculate it using the existing logic
-	if convertedTag == "" {
-		convertedTag = calculateConvertedTag(targetImage, tag, false, needsDevSuffix)
-	}
-
-	// Build the image reference
-	chainguardImageRef := buildImageReference(targetImage, convertedTag, opts)
-
-	// Get the converted image reference
-	var finalImageRef string
-
-	// If a custom FROM line converter is provided, use it
-	if opts.FromLineConverter != nil {
-		customImageRef, err := opts.FromLineConverter(fromDetails, chainguardImageRef, needsDevSuffix)
-		if err != nil {
-			// On error, use the original value
-			finalImageRef = arg.DefaultValue
-		} else {
-			finalImageRef = customImageRef
-		}
-	} else {
-		// Use the default converter result
-		finalImageRef = chainguardImageRef
-	}
-
-	// Create the converted ARG line
-	argLine := DirectiveArg + " " + arg.Name + "=" + finalImageRef
-
-	// Create the Arg details
-	argDetails := &ArgDetails{
+// convertArgLine converts an ARG line that is used as a base image
+func convertArgLine(ctx context.Context, arg *ArgDetails, lines []*DockerfileLine, stagesWithRunCommands map[int]bool, opts Options) (string, *ArgDetails) {
+	// Create a copy of the arg
+	newArg := &ArgDetails{
 		Name:         arg.Name,
-		DefaultValue: finalImageRef,
-		UsedAsBase:   true,
+		DefaultValue: arg.DefaultValue,
+		UsedAsBase:   arg.UsedAsBase,
 	}
 
-	return argLine, argDetails
+	// Only convert the default value if it's used as a base
+	if arg.UsedAsBase && arg.DefaultValue != "" {
+		// Find which stages use this ARG as their base
+		needsDevSuffix := determineIfArgNeedsDevSuffix(arg.Name, lines, stagesWithRunCommands)
+
+		// Parse the default value as an image reference
+		base, tag := parseImageReference(arg.DefaultValue)
+
+		// Create a fake FROM details for conversion
+		from := &FromDetails{
+			Base: base,
+			Tag:  tag,
+			Orig: arg.DefaultValue,
+		}
+
+		// Convert using the FROM line converter
+		convertedImage := convertFromLine(ctx, from, -1, stagesWithRunCommands, opts)
+
+		// Update the ARG details
+		newArg.DefaultValue = convertedImage
+	}
+
+	// Build the converted ARG line
+	if newArg.DefaultValue != "" {
+		return fmt.Sprintf("ARG %s=%s", newArg.Name, newArg.DefaultValue), newArg
+	}
+	return fmt.Sprintf("ARG %s", newArg.Name), newArg
 }
 
 // determineIfArgNeedsDevSuffix determines if an ARG used as base needs a -dev suffix
@@ -914,346 +912,154 @@ func buildImageReference(baseFilename string, tag string, opts Options) string {
 	return newBase
 }
 
-// processRunLine handles the conversion of RUN lines
-func processRunLine(newLine *DockerfileLine, line *DockerfileLine, stagePackages map[int][]string, packageMap PackageMap) {
-	beforeShell := line.Run.Shell.Before
+// processRunLine handles converting a RUN line
+func processRunLine(ctx context.Context, newLine *DockerfileLine, line *DockerfileLine, stagePackages map[int][]string, provider MappingProvider) {
+	log := clog.FromContext(ctx)
 
-	// Initialize RunDetails with Before shell
-	newLine.Run = &RunDetails{
-		Shell: &RunDetailsShell{
-			Before: beforeShell,
-		},
-	}
+	// Deep clone the ShellCommand to avoid modifying the original
+	newShell := cloneShellCommand(line.Run.Shell.Before)
 
-	// First check for package manager commands
-	modifiedPMCommands, distro, manager, packages, mappedPackages, afterShell :=
-		convertPackageManagerCommands(beforeShell, packageMap)
-	newLine.Run.Distro = distro
-	newLine.Run.Manager = manager
-	newLine.Run.Packages = packages
+	// Check if we need to convert package manager commands
+	converted, distro, manager, packages, newPackages, newShell := convertPackageManagerCommands(ctx, newShell, provider)
+	if converted {
+		// Get the stage
+		stage := line.Stage
 
-	// Add the mapped packages to the stage's package list
-	if len(mappedPackages) > 0 {
-		if _, exists := stagePackages[line.Stage]; !exists {
-			stagePackages[line.Stage] = []string{}
+		// Update the stage packages
+		if stagePackages[stage] == nil {
+			stagePackages[stage] = make([]string, 0)
 		}
-		stagePackages[line.Stage] = append(stagePackages[line.Stage], mappedPackages...)
-	}
+		stagePackages[stage] = append(stagePackages[stage], packages...)
 
-	modifiedBusyboxCommands := false
-	modifiedBusyboxCommands, afterShell = convertBusyboxCommands(afterShell, stagePackages[line.Stage])
-
-	// Check if we modified anything (related to package managers or useradd/groupadd)
-	modifiedAnything := modifiedPMCommands || modifiedBusyboxCommands
-
-	// If we modified the shell command, set After and Converted
-	if modifiedAnything {
-		newLine.Run.Shell.After = afterShell
-
-		// Extract the original RUN directive from the raw line to preserve case
-		rawLine := line.Raw
-		upperRawLine := strings.ToUpper(rawLine)
-
-		// Find the position of the case-insensitive "RUN " directive
-		runPrefix := DirectiveRun + " "
-		runIndex := strings.Index(upperRawLine, runPrefix)
-
-		if runIndex != -1 {
-			// Get the original case of the RUN directive
-			originalRunDirective := rawLine[runIndex : runIndex+len(runPrefix)]
-			newLine.Converted = originalRunDirective + afterShell.String()
-		} else {
-			// Fallback if we can't find the directive (shouldn't happen)
-			newLine.Converted = DirectiveRun + " " + afterShell.String()
+		// Update the Run details
+		if newLine.Run == nil {
+			newLine.Run = &RunDetails{}
 		}
-	}
-}
+		newLine.Run.Distro = distro
+		newLine.Run.Manager = manager
+		newLine.Run.Packages = packages
 
-// addUserRootDirectives adds USER root directives where needed
-func addUserRootDirectives(lines []*DockerfileLine) {
-	// First determine which stages have converted RUN lines
-	stagesWithConvertedRuns := make(map[int]bool)
-	// Also keep track of stages that already have USER root directives
-	stagesWithUserRoot := make(map[int]bool)
-
-	// First pass - identify stages with converted RUN lines and existing USER root directives
-	for _, line := range lines {
-		// Check if this is a converted RUN line
-		if line.Run != nil && line.Converted != "" {
-			stagesWithConvertedRuns[line.Stage] = true
+		// Update the line's Shell
+		newLine.Run.Shell = &RunDetailsShell{
+			Before: newShell,
 		}
 
-		// Check if this line is a USER directive with root
-		raw := line.Raw
-		converted := line.Converted
-
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(raw)), DirectiveUser+" ") &&
-			strings.Contains(strings.ToLower(raw), DefaultUser) {
-			stagesWithUserRoot[line.Stage] = true
-		}
-
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(converted)), DirectiveUser+" ") &&
-			strings.Contains(strings.ToLower(converted), DefaultUser) {
-			stagesWithUserRoot[line.Stage] = true
-		}
-	}
-
-	// If we found any stages with converted RUN lines, add USER root after the FROM
-	if len(stagesWithConvertedRuns) > 0 {
-		for _, line := range lines {
-			// Check if this is a FROM line in a stage that has converted RUN lines
-			if line.From != nil && stagesWithConvertedRuns[line.Stage] {
-				// If the FROM line was converted and there's no USER root directive in this stage already
-				if line.Converted != "" && !stagesWithUserRoot[line.Stage] {
-					// Add a USER root directive after this FROM line
-					line.Converted += "\n" + DirectiveUser + " " + DefaultUser
-					// Mark this stage as having a USER root directive
-					stagesWithUserRoot[line.Stage] = true
-				}
+		// Construct the converted line
+		var convertedLine strings.Builder
+		convertedLine.WriteString("RUN ")
+		convertedLine.WriteString(newShell.String())
+		newLine.Converted = convertedLine.String()
+	} else {
+		// Also try to convert Busybox commands like tar
+		busyboxConverted, newBusyboxShell := convertBusyboxCommands(newShell, stagePackages[line.Stage])
+		if busyboxConverted {
+			// Update the line's Shell
+			if newLine.Run == nil {
+				newLine.Run = &RunDetails{}
 			}
-		}
-	}
-}
-
-// shouldConvertFromLine determines if a FROM line should be converted
-func shouldConvertFromLine(from *FromDetails) bool {
-	// Skip conversion for scratch, parent stages, or dynamic bases
-	if from.Base == "scratch" || from.Parent > 0 || from.BaseDynamic {
-		return false
-	}
-	return true
-}
-
-// convertImageTag returns the converted image tag
-func convertImageTag(tag string, _ bool) string {
-	if tag == "" {
-		return DefaultImageTag
-	}
-
-	// Remove anything after and including the first hyphen
-	if hyphenIndex := strings.Index(tag, "-"); hyphenIndex != -1 {
-		tag = tag[:hyphenIndex]
-	}
-
-	// If tag has 'v' prefix for semver, remove it
-	if len(tag) > 0 && tag[0] == 'v' && (len(tag) > 1 && (tag[1] >= '0' && tag[1] <= '9')) {
-		tag = tag[1:]
-	}
-
-	// Check if this is a semver tag (e.g. 1.2.3)
-	semverParts := strings.Split(tag, ".")
-	isSemver := false
-
-	// Consider tags that are just a number (like "9" or "18") as valid semver-like tags
-	if len(semverParts) == 1 {
-		_, err := strconv.Atoi(semverParts[0])
-		if err == nil {
-			isSemver = true
-		}
-	} else if len(semverParts) >= 2 {
-		// Check if at least the first two parts are numeric
-		major, majorErr := strconv.Atoi(semverParts[0])
-		minor, minorErr := strconv.Atoi(semverParts[1])
-		if majorErr == nil && minorErr == nil && major >= 0 && minor >= 0 {
-			isSemver = true
-			// Keep only major.minor for semver tags
-			if len(semverParts) > 2 {
-				tag = fmt.Sprintf("%d.%d", major, minor)
+			newLine.Run.Shell = &RunDetailsShell{
+				Before: newBusyboxShell,
 			}
+
+			// Construct the converted line
+			var convertedLine strings.Builder
+			convertedLine.WriteString("RUN ")
+			convertedLine.WriteString(newBusyboxShell.String())
+			newLine.Converted = convertedLine.String()
 		}
 	}
-
-	// If not a semver and not latest, use latest
-	if !isSemver && tag != "latest" {
-		return "latest"
-	}
-
-	return tag
 }
 
-// convertPackageManagerCommands converts package manager commands in a shell command
-// to the Alpine equivalent (apk add)
-func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (bool, Distro, Manager, []string, []string, *ShellCommand) {
+// convertPackageManagerCommands converts package manager commands (apt-get, yum, etc.)
+func convertPackageManagerCommands(ctx context.Context, shell *ShellCommand, provider MappingProvider) (bool, Distro, Manager, []string, []string, *ShellCommand) {
 	if shell == nil {
 		return false, "", "", nil, nil, nil
 	}
 
-	// Determine which distro/package manager we're going to focus on
+	// Create a deep copy of the shell command to avoid modifying the original
+	newShell := cloneShellCommand(shell)
+	if newShell == nil || len(newShell.Parts) == 0 {
+		return false, "", "", nil, nil, newShell
+	}
+
+	// Check for package manager commands
+	var foundPMCommand bool
 	var distro Distro
-	var firstPM Manager
-	var firstPMInstallIndex = -1
-	packagesDetected := []string{}
-	packagesToInstall := []string{}
-	hasPackageManager := false
-	hasNonPackageManagerCommands := false
+	var manager Manager
+	var packagesDetected []string
+	var packagesToInstall []string
 
-	// Identify package manager and collect packages
-	for i, part := range shell.Parts {
-		// Check if this is a package manager command
-		if pmInfo := PackageManagerInfoMap[Manager(part.Command)]; pmInfo.Distro != "" {
-			// We found a package manager command
-			hasPackageManager = true
+	// Map command parts to the Alpine equivalent (apk add)
+	for i, part := range newShell.Parts {
+		// Get the command from the first part
+		command := part.Value
 
-			// Set the package manager if it's the first one we've found
-			if firstPM == "" {
-				firstPM = Manager(part.Command)
-				distro = pmInfo.Distro
-			}
+		// Check if it's a package manager command
+		packageManagerInfo := getPackageManagerInfo(command)
+		if packageManagerInfo.Distro != "" {
+			distro = packageManagerInfo.Distro
+			manager = Manager(command)
 
-			// Only process install commands from the first package manager we encounter
-			if Manager(part.Command) == firstPM {
-				// Check if this is an install command by finding the install keyword
-				installKeywordIndex := -1
-				// Find the index of the install keyword in arguments
-				for j, arg := range part.Args {
-					if arg == pmInfo.InstallKeyword {
-						installKeywordIndex = j
-						break
-					}
-				}
+			// Look for the install keyword in this or subsequent parts
+			for j := i; j < len(newShell.Parts); j++ {
+				if strings.Contains(newShell.Parts[j].Value, packageManagerInfo.InstallKeyword) {
+					// Found package manager install command
 
-				// If we found the install keyword, process the command
-				if installKeywordIndex >= 0 {
-					if firstPMInstallIndex == -1 {
-						firstPMInstallIndex = i
-					}
-
-					// Collect packages, applying mapping if available
-					// Start from after the install keyword
-					for _, arg := range part.Args[installKeywordIndex+1:] {
-						if !strings.HasPrefix(arg, "-") {
+					// Skip the command and install keyword parts
+					for k := j + 1; k < len(newShell.Parts); k++ {
+						// Look for package names, skipping flags
+						arg := newShell.Parts[k].Value
+						if !strings.HasPrefix(arg, "-") && arg != "install" && arg != "upgrade" && arg != "add" && arg != packageManagerInfo.InstallKeyword {
+							// Looks like a package name
 							packagesDetected = append(packagesDetected, arg)
 
-							if distroMap, exists := packageMap[distro]; exists && distroMap[arg] != nil {
-								packagesToInstall = append(packagesToInstall, distroMap[arg]...)
+							// Look up package mappings using the provider
+							targets, found, err := provider.GetPackageMappings(ctx, distro, arg)
+							if err != nil {
+								// Just log the error and continue with the original package
+								continue
+							}
+
+							if found && len(targets) > 0 {
+								packagesToInstall = append(packagesToInstall, targets...)
 							} else {
+								// If no mapping is found, keep the original package
 								packagesToInstall = append(packagesToInstall, arg)
 							}
 						}
 					}
+
+					// We found and processed a package manager command
+					foundPMCommand = true
+					break
 				}
 			}
-		} else {
-			// This is not a package manager command
-			hasNonPackageManagerCommands = true
-		}
-	}
 
-	// If we don't have any package manager commands, return the original shell
-	if !hasPackageManager {
-		return false, distro, firstPM, nil, nil, shell
-	}
+			// If we found a package manager command, convert it
+			if foundPMCommand {
+				var updatedParts []*ShellPart
 
-	// Sort and deduplicate packages
-	slices.Sort(packagesDetected)
-	packagesDetected = slices.Compact(packagesDetected)
+				// Create the new command (apk add ...)
+				updatedParts = append(updatedParts, &ShellPart{Value: "apk"})
+				updatedParts = append(updatedParts, &ShellPart{Value: "add"})
 
-	// Sort and deduplicate packages for installation
-	// Create a map to deduplicate first
-	packagesMap := make(map[string]bool)
-	for _, pkg := range packagesToInstall {
-		packagesMap[pkg] = true
-	}
+				// Add each package from packagesToInstall
+				uniquePackages := map[string]bool{}
+				for _, pkg := range packagesToInstall {
+					if pkg != "" && !uniquePackages[pkg] {
+						updatedParts = append(updatedParts, &ShellPart{Value: pkg})
+						uniquePackages[pkg] = true
+					}
+				}
 
-	// Clear the package list
-	packagesToInstall = []string{}
-
-	// Add packages back to the list in sorted order
-	for pkg := range packagesMap {
-		packagesToInstall = append(packagesToInstall, pkg)
-	}
-	slices.Sort(packagesToInstall)
-
-	// If we only have package manager commands and no non-PM commands,
-	// and we found packages to install, convert it to just an apk add command
-	if !hasNonPackageManagerCommands && len(packagesToInstall) > 0 {
-		// Return a simple apk add command
-		return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{
-			Parts: []*ShellPart{
-				{
-					Command: string(ManagerApk),
-					Args:    append([]string{SubcommandAdd, ApkNoCacheFlag}, packagesToInstall...),
-				},
-			},
-		}
-	}
-
-	// If we only have package manager commands but no packages to install,
-	// return a simple "true" command
-	if !hasNonPackageManagerCommands && len(packagesToInstall) == 0 {
-		return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{
-			Parts: []*ShellPart{
-				{
-					Command: "true",
-				},
-			},
-		}
-	}
-
-	// Create a new shell command with parts
-	newParts := make([]*ShellPart, 0, len(shell.Parts))
-
-	// Track if we've already inserted the apk add command
-	apkAdded := false
-
-	// Create the apk add part to be inserted at the right position
-	apkPart := &ShellPart{
-		Command: string(ManagerApk),
-		Args:    append([]string{SubcommandAdd, ApkNoCacheFlag}, packagesToInstall...),
-	}
-
-	// Process parts in the original order
-	for i, part := range shell.Parts {
-		if Manager(part.Command) == firstPM {
-			// This is a package manager command, possibly replace with apk add
-
-			// If this is the first package manager install command and we haven't added apk yet
-			if i == firstPMInstallIndex && !apkAdded && len(packagesToInstall) > 0 {
-				// Copy the delimiter and extra parts from the original command
-				apkPart.Delimiter = part.Delimiter
-				apkPart.ExtraPre = part.ExtraPre
-
-				// Add the apk add command at this position
-				newParts = append(newParts, apkPart)
-				apkAdded = true
-			}
-			// Skip this package manager command (don't add it to newParts)
-		} else {
-			// This is not a package manager command, keep it
-			newPart := cloneShellPart(part)
-			newParts = append(newParts, newPart)
-		}
-	}
-
-	// If we didn't add the apk add command yet (because firstPMInstallIndex wasn't found or was at end)
-	// and we have packages to install, add it at the end
-	if !apkAdded && len(packagesToInstall) > 0 && len(newParts) > 0 {
-		// Set delimiter on the last part
-		newParts[len(newParts)-1].Delimiter = "&&"
-		newParts = append(newParts, apkPart)
-	} else if !apkAdded && len(packagesToInstall) > 0 {
-		// No parts added yet but we have packages - just add the apk part
-		newParts = append(newParts, apkPart)
-	}
-
-	// Fix delimiters: ensure the last part has no delimiter
-	if len(newParts) > 0 {
-		newParts[len(newParts)-1].Delimiter = ""
-
-		// Also fix any consecutive delimiters
-		for i := 0; i < len(newParts)-1; i++ {
-			if newParts[i].Delimiter == "" {
-				newParts[i].Delimiter = "&&"
+				// Replace the shell parts with our updated command
+				newShell.Parts = updatedParts
+				break
 			}
 		}
-	} else {
-		// If no parts remain, use a simple "true" command
-		newParts = append(newParts, &ShellPart{
-			Command: "true",
-		})
 	}
 
-	return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{Parts: newParts}
+	return foundPMCommand, distro, manager, packagesDetected, packagesToInstall, newShell
 }
 
 // Helper function to clone a shell part
@@ -1406,4 +1212,259 @@ func normalizeImageName(imageRef string) string {
 	}
 
 	return imageRef
+}
+
+// MappingProvider is an interface for getting package and image mappings
+type MappingProvider interface {
+	// GetImageMapping returns the target image for a source image
+	GetImageMapping(ctx context.Context, sourceImage string) (string, bool, error)
+
+	// GetPackageMappings returns the target packages for a source package
+	GetPackageMappings(ctx context.Context, distro Distro, sourcePackage string) ([]string, bool, error)
+}
+
+// DBMappingProvider implements MappingProvider using direct database queries
+type DBMappingProvider struct {
+	db *DBConnection
+}
+
+// NewDBMappingProvider creates a new DBMappingProvider
+func NewDBMappingProvider(db *DBConnection) *DBMappingProvider {
+	return &DBMappingProvider{db: db}
+}
+
+// GetImageMapping gets an image mapping from the database
+func (p *DBMappingProvider) GetImageMapping(ctx context.Context, sourceImage string) (string, bool, error) {
+	return GetImageMapping(ctx, p.db, sourceImage)
+}
+
+// GetPackageMappings gets package mappings from the database
+func (p *DBMappingProvider) GetPackageMappings(ctx context.Context, distro Distro, sourcePackage string) ([]string, bool, error) {
+	return GetPackageMappings(ctx, p.db, distro, sourcePackage)
+}
+
+// InMemoryMappingProvider implements MappingProvider using in-memory mappings
+type InMemoryMappingProvider struct {
+	mappings MappingsConfig
+}
+
+// NewInMemoryMappingProvider creates a new InMemoryMappingProvider
+func NewInMemoryMappingProvider(mappings MappingsConfig) *InMemoryMappingProvider {
+	return &InMemoryMappingProvider{mappings: mappings}
+}
+
+// GetImageMapping gets an image mapping from in-memory mappings
+func (p *InMemoryMappingProvider) GetImageMapping(ctx context.Context, sourceImage string) (string, bool, error) {
+	log := clog.FromContext(ctx)
+	log.Debug("Looking up image mapping in memory", "source", sourceImage)
+
+	// Check for exact match
+	if targetImage, ok := p.mappings.Images[sourceImage]; ok {
+		log.Debug("Found exact image mapping in memory", "source", sourceImage, "target", targetImage)
+		return targetImage, true, nil
+	}
+
+	// Check for wildcard matches
+	for source, target := range p.mappings.Images {
+		if strings.Contains(source, "*") {
+			// Convert wildcard pattern to regex
+			pattern := strings.ReplaceAll(source, "*", ".*")
+			matched, err := regexp.MatchString("^"+pattern+"$", sourceImage)
+			if err != nil {
+				log.Debug("Error matching pattern", "pattern", pattern, "error", err)
+				continue
+			}
+
+			if matched {
+				log.Debug("Found wildcard match in memory", "pattern", source, "source", sourceImage, "target", target)
+				return target, true, nil
+			}
+		}
+	}
+
+	return "", false, nil
+}
+
+// GetPackageMappings gets package mappings from in-memory mappings
+func (p *InMemoryMappingProvider) GetPackageMappings(ctx context.Context, distro Distro, sourcePackage string) ([]string, bool, error) {
+	log := clog.FromContext(ctx)
+	log.Debug("Looking up package mapping in memory", "distro", distro, "source", sourcePackage)
+
+	// Check if the distro exists
+	distroMappings, ok := p.mappings.Packages[distro]
+	if !ok {
+		return nil, false, nil
+	}
+
+	// Check if the package exists
+	targetPackages, ok := distroMappings[sourcePackage]
+	if !ok || len(targetPackages) == 0 {
+		return nil, false, nil
+	}
+
+	log.Debug("Found package mappings in memory", "distro", distro, "source", sourcePackage, "targets", targetPackages)
+	return targetPackages, true, nil
+}
+
+// ChainedMappingProvider implements MappingProvider by chaining multiple providers
+type ChainedMappingProvider struct {
+	providers []MappingProvider
+}
+
+// NewChainedMappingProvider creates a new ChainedMappingProvider
+func NewChainedMappingProvider(providers ...MappingProvider) *ChainedMappingProvider {
+	return &ChainedMappingProvider{providers: providers}
+}
+
+// GetImageMapping gets an image mapping by checking each provider in order
+func (p *ChainedMappingProvider) GetImageMapping(ctx context.Context, sourceImage string) (string, bool, error) {
+	for _, provider := range p.providers {
+		targetImage, found, err := provider.GetImageMapping(ctx, sourceImage)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			return targetImage, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// GetPackageMappings gets package mappings by checking each provider in order
+func (p *ChainedMappingProvider) GetPackageMappings(ctx context.Context, distro Distro, sourcePackage string) ([]string, bool, error) {
+	for _, provider := range p.providers {
+		targetPackages, found, err := provider.GetPackageMappings(ctx, distro, sourcePackage)
+		if err != nil {
+			return nil, false, err
+		}
+		if found {
+			return targetPackages, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// shouldConvertFromLine determines if a FROM line should be converted
+func shouldConvertFromLine(from *FromDetails) bool {
+	// Skip conversion for scratch, parent stages, or dynamic bases
+	if from.Base == "scratch" || from.Parent > 0 || from.BaseDynamic {
+		return false
+	}
+	return true
+}
+
+// addUserRootDirectives adds USER root directives where needed
+func addUserRootDirectives(lines []*DockerfileLine) {
+	// First determine which stages have converted RUN lines
+	stagesWithConvertedRuns := make(map[int]bool)
+	// Also keep track of stages that already have USER root directives
+	stagesWithUserRoot := make(map[int]bool)
+
+	// First pass - identify stages with converted RUN lines and existing USER root directives
+	for _, line := range lines {
+		// Check if this is a converted RUN line
+		if line.Run != nil && line.Converted != "" {
+			stagesWithConvertedRuns[line.Stage] = true
+		}
+
+		// Check if this line is a USER directive with root
+		raw := line.Raw
+		converted := line.Converted
+
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(raw)), DirectiveUser+" ") &&
+			strings.Contains(strings.ToLower(raw), DefaultUser) {
+			stagesWithUserRoot[line.Stage] = true
+		}
+
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(converted)), DirectiveUser+" ") &&
+			strings.Contains(strings.ToLower(converted), DefaultUser) {
+			stagesWithUserRoot[line.Stage] = true
+		}
+	}
+
+	// If we found any stages with converted RUN lines, add USER root after the FROM
+	if len(stagesWithConvertedRuns) > 0 {
+		for _, line := range lines {
+			// Check if this is a FROM line in a stage that has converted RUN lines
+			if line.From != nil && stagesWithConvertedRuns[line.Stage] {
+				// If the FROM line was converted and there's no USER root directive in this stage already
+				if line.Converted != "" && !stagesWithUserRoot[line.Stage] {
+					// Add a USER root directive after this FROM line
+					line.Converted += "\n" + DirectiveUser + " " + DefaultUser
+					// Mark this stage as having a USER root directive
+					stagesWithUserRoot[line.Stage] = true
+				}
+			}
+		}
+	}
+}
+
+// cloneShellCommand creates a deep copy of a ShellCommand
+func cloneShellCommand(cmd *ShellCommand) *ShellCommand {
+	if cmd == nil {
+		return nil
+	}
+
+	result := &ShellCommand{
+		Parts: make([]*ShellPart, len(cmd.Parts)),
+	}
+
+	for i, part := range cmd.Parts {
+		result.Parts[i] = cloneShellPart(part)
+	}
+
+	return result
+}
+
+// convertImageTag returns the converted image tag
+func convertImageTag(tag string, _ bool) string {
+	if tag == "" {
+		return DefaultImageTag
+	}
+
+	// Remove anything after and including the first hyphen
+	if hyphenIndex := strings.Index(tag, "-"); hyphenIndex != -1 {
+		tag = tag[:hyphenIndex]
+	}
+
+	// If tag has 'v' prefix for semver, remove it
+	if len(tag) > 0 && tag[0] == 'v' && (len(tag) > 1 && (tag[1] >= '0' && tag[1] <= '9')) {
+		tag = tag[1:]
+	}
+
+	// Check if this is a semver tag (e.g. 1.2.3)
+	semverParts := strings.Split(tag, ".")
+	isSemver := false
+
+	// Consider tags that are just a number (like "9" or "18") as valid semver-like tags
+	if len(semverParts) == 1 {
+		_, err := strconv.Atoi(semverParts[0])
+		if err == nil {
+			isSemver = true
+		}
+	} else if len(semverParts) >= 2 {
+		// Check if at least the first two parts are numeric
+		major, majorErr := strconv.Atoi(semverParts[0])
+		minor, minorErr := strconv.Atoi(semverParts[1])
+		if majorErr == nil && minorErr == nil && major >= 0 && minor >= 0 {
+			isSemver = true
+			// Keep only major.minor for semver tags
+			if len(semverParts) > 2 {
+				tag = fmt.Sprintf("%d.%d", major, minor)
+			}
+		}
+	}
+
+	// If not a semver and not latest, use latest
+	if !isSemver && tag != "latest" {
+		return "latest"
+	}
+
+	return tag
+}
+
+// fileExists returns true if the file exists
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

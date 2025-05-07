@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/adrg/xdg"
@@ -262,7 +264,94 @@ func CreateDBFromYAML(ctx context.Context, yamlPath, outputPath string) error {
 	return CreateDB(ctx, mappings, outputPath)
 }
 
+// GetImageMapping gets a single image mapping from the database
+func GetImageMapping(ctx context.Context, db *DBConnection, sourceImage string) (string, bool, error) {
+	log := clog.FromContext(ctx)
+	log.Debug("Looking up image mapping in database", "source", sourceImage)
+
+	// Try to get the exact match first
+	var targetImage string
+	err := db.QueryRow("SELECT target FROM images WHERE source = ?", sourceImage).Scan(&targetImage)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No exact match found, try pattern matching for images with wildcards
+			rows, err := db.Query("SELECT source, target FROM images WHERE source LIKE '%*%'")
+			if err != nil {
+				return "", false, fmt.Errorf("querying images with wildcards: %w", err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var wildcardSource, wildcardTarget string
+				if err := rows.Scan(&wildcardSource, &wildcardTarget); err != nil {
+					return "", false, fmt.Errorf("scanning wildcard row: %w", err)
+				}
+
+				// Convert wildcard pattern to regex
+				pattern := strings.ReplaceAll(wildcardSource, "*", ".*")
+				matched, err := regexp.MatchString("^"+pattern+"$", sourceImage)
+				if err != nil {
+					log.Debug("Error matching pattern", "pattern", pattern, "error", err)
+					continue
+				}
+
+				if matched {
+					log.Debug("Found wildcard match", "pattern", wildcardSource, "source", sourceImage, "target", wildcardTarget)
+					return wildcardTarget, true, nil
+				}
+			}
+
+			if err := rows.Err(); err != nil {
+				return "", false, fmt.Errorf("iterating wildcard rows: %w", err)
+			}
+
+			// No matches found
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("querying image mapping: %w", err)
+	}
+
+	log.Debug("Found exact image mapping", "source", sourceImage, "target", targetImage)
+	return targetImage, true, nil
+}
+
+// GetPackageMappings gets package mappings for a specific distro and source package
+func GetPackageMappings(ctx context.Context, db *DBConnection, distro Distro, sourcePackage string) ([]string, bool, error) {
+	log := clog.FromContext(ctx)
+	log.Debug("Looking up package mapping in database", "distro", distro, "source", sourcePackage)
+
+	// Query for package mappings
+	rows, err := db.Query("SELECT target FROM packages WHERE distro = ? AND source = ?", string(distro), sourcePackage)
+	if err != nil {
+		return nil, false, fmt.Errorf("querying package mappings: %w", err)
+	}
+	defer rows.Close()
+
+	var targetPackages []string
+	for rows.Next() {
+		var target string
+		if err := rows.Scan(&target); err != nil {
+			return nil, false, fmt.Errorf("scanning package row: %w", err)
+		}
+		targetPackages = append(targetPackages, target)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterating package rows: %w", err)
+	}
+
+	if len(targetPackages) == 0 {
+		// No mappings found
+		return nil, false, nil
+	}
+
+	log.Debug("Found package mappings", "distro", distro, "source", sourcePackage, "targets", targetPackages)
+	return targetPackages, true, nil
+}
+
 // LoadMappingsFromDB loads mappings from the SQLite database
+// Note: This function loads the entire database into memory and should be used
+// only when necessary. For individual lookups, prefer GetImageMapping and GetPackageMappings.
 func LoadMappingsFromDB(ctx context.Context, db *DBConnection) (MappingsConfig, error) {
 	log := clog.FromContext(ctx)
 	var mappings MappingsConfig
