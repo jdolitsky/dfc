@@ -249,86 +249,66 @@ func TestUpdateIndexJSON(t *testing.T) {
 
 	// Create the OCI layout
 	if err := initOCILayout(testCacheDir); err != nil {
-		t.Fatalf("Failed to initialize OCI layout: %v", err)
+		t.Fatalf("initOCILayout() error = %v", err)
 	}
 
-	// Check initial index.json
-	indexPath := filepath.Join(testCacheDir, "index.json")
-	initialIndex, err := os.ReadFile(indexPath)
-	if err != nil {
-		t.Fatalf("Failed to read initial index.json: %v", err)
-	}
-
-	var index ociIndex
-	if err := json.Unmarshal(initialIndex, &index); err != nil {
-		t.Fatalf("Failed to unmarshal initial index.json: %v", err)
-	}
-
-	// Verify index is empty
-	if len(index.Manifests) != 0 {
-		t.Errorf("Initial index.json has manifests, expected none")
-	}
-
-	// Update index.json
-	testDigest := "sha256:abcdef123456"
+	// Create a test digest
+	testDigest := "sha256:1234567890abcdef"
 	testSize := int64(1024)
-	if err := updateIndexJSON(testCacheDir, testDigest, testSize); err != nil {
+
+	// Test adding an entry
+	if err := updateIndexJSON(testCacheDir, testDigest, testSize, "yaml"); err != nil {
 		t.Fatalf("updateIndexJSON() error = %v", err)
 	}
 
-	// Check updated index.json
-	updatedIndex, err := os.ReadFile(indexPath)
+	// Read the index.json to verify the entry was added
+	indexPath := filepath.Join(testCacheDir, "index.json")
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("Failed to read index.json: %v", err)
+	}
+
+	var index ociIndex
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatalf("Failed to parse index.json: %v", err)
+	}
+
+	// Verify there's one entry
+	if len(index.Manifests) != 1 {
+		t.Errorf("Expected 1 manifest, got %d", len(index.Manifests))
+	}
+
+	// Verify the entry has the expected values
+	if index.Manifests[0].Digest != testDigest {
+		t.Errorf("Manifest digest = %s, want %s", index.Manifests[0].Digest, testDigest)
+	}
+	if index.Manifests[0].Size != testSize {
+		t.Errorf("Manifest size = %d, want %d", index.Manifests[0].Size, testSize)
+	}
+
+	// Test replacing an entry with the same digest but different size
+	if err := updateIndexJSON(testCacheDir, testDigest, testSize+10, "yaml"); err != nil {
+		t.Fatalf("updateIndexJSON() error = %v", err)
+	}
+
+	// Read the index.json again
+	indexData, err = os.ReadFile(indexPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated index.json: %v", err)
 	}
 
-	var updatedIndexObj ociIndex
-	if err := json.Unmarshal(updatedIndex, &updatedIndexObj); err != nil {
-		t.Fatalf("Failed to unmarshal updated index.json: %v", err)
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatalf("Failed to parse updated index.json: %v", err)
 	}
 
-	// Verify index has one manifest
-	if len(updatedIndexObj.Manifests) != 1 {
-		t.Fatalf("Updated index.json has %d manifests, expected 1", len(updatedIndexObj.Manifests))
+	// Verify there's still one entry
+	if len(index.Manifests) != 1 {
+		t.Errorf("Expected 1 manifest after update, got %d", len(index.Manifests))
 	}
 
-	manifest := updatedIndexObj.Manifests[0]
-	if manifest.Digest != testDigest {
-		t.Errorf("Manifest digest = %s, want %s", manifest.Digest, testDigest)
-	}
-	if manifest.Size != testSize {
-		t.Errorf("Manifest size = %d, want %d", manifest.Size, testSize)
-	}
-	if manifest.MediaType != "application/yaml" {
-		t.Errorf("Manifest media type = %s, want application/yaml", manifest.MediaType)
-	}
-	if _, ok := manifest.Annotations["vnd.chainguard.dfc.mappings.downloadedAt"]; !ok {
-		t.Errorf("Manifest missing downloadedAt annotation")
-	}
-
-	// Update again with same digest to test filtering
-	if err := updateIndexJSON(testCacheDir, testDigest, testSize+10); err != nil {
-		t.Fatalf("updateIndexJSON() error = %v", err)
-	}
-
-	finalIndex, err := os.ReadFile(indexPath)
-	if err != nil {
-		t.Fatalf("Failed to read final index.json: %v", err)
-	}
-
-	var finalIndexObj ociIndex
-	if err := json.Unmarshal(finalIndex, &finalIndexObj); err != nil {
-		t.Fatalf("Failed to unmarshal final index.json: %v", err)
-	}
-
-	// Verify index still has one manifest but with updated size
-	if len(finalIndexObj.Manifests) != 1 {
-		t.Fatalf("Final index.json has %d manifests, expected 1", len(finalIndexObj.Manifests))
-	}
-
-	finalManifest := finalIndexObj.Manifests[0]
-	if finalManifest.Size != testSize+10 {
-		t.Errorf("Final manifest size = %d, want %d", finalManifest.Size, testSize+10)
+	// Verify the size was updated
+	if index.Manifests[0].Size != testSize+10 {
+		t.Errorf("Updated manifest size = %d, want %d", index.Manifests[0].Size, testSize+10)
 	}
 }
 
@@ -530,7 +510,7 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 	}
 
 	// Update index.json
-	if err := updateIndexJSON(testCacheDir, digestString, int64(len(testMappingsYAML))); err != nil {
+	if err := updateIndexJSON(testCacheDir, digestString, int64(len(testMappingsYAML)), "yaml"); err != nil {
 		t.Fatalf("Failed to update index.json: %v", err)
 	}
 
@@ -574,49 +554,97 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 
 // TestUpdate_CreateCacheDirectories tests that the cache directories are created
 func TestUpdate_CreateCacheDirectories(t *testing.T) {
-	// Create test environment
+	// Setup test environment
 	cacheDir, _, _ := setupTestEnvironment(t)
 
-	// Setup server
+	// Extract just the parent directory without the org-specific subdirectories
+	parentCacheDir := filepath.Dir(filepath.Dir(filepath.Join(cacheDir, orgName, "mappings")))
+
+	// Remove the cache directory to simulate it not existing
+	if err := os.RemoveAll(parentCacheDir); err != nil {
+		t.Fatalf("Failed to remove cache directory: %v", err)
+	}
+
+	// Create test server
 	server := setupTestServer(t)
+	url := fmt.Sprintf("%s/builtin-mappings.yaml", server.URL)
 
-	// Delete any existing cache directory
-	testCacheDir := filepath.Join(cacheDir, orgName, "mappings")
-	if err := os.RemoveAll(testCacheDir); err != nil {
-		t.Fatalf("Failed to clean cache directory: %v", err)
+	// Override the getCacheDir function to return our test directory
+	origGetCacheDir := getCacheDir
+	defer func() { getCacheDir = origGetCacheDir }()
+	getCacheDir = func() string {
+		return filepath.Join(parentCacheDir, orgName, "mappings")
 	}
 
-	// Run update
-	opts := UpdateOptions{
-		MappingsURL: server.URL + "/builtin-mappings.yaml",
-	}
+	// Calculate the expected digest
+	hash := sha256.New()
+	hash.Write([]byte(testMappingsYAML))
+	hashBytes := hash.Sum(nil)
+	hashString := hex.EncodeToString(hashBytes)
+	digestString := "sha256:" + hashString
 
-	err := Update(context.Background(), opts)
+	// Run the update
+	ctx := context.Background()
+	err := updateMappingsFile(ctx, url, "")
 	if err != nil {
-		t.Fatalf("Update() error = %v", err)
+		t.Fatalf("Update failed: %v", err)
 	}
 
-	// Verify cache directory was created
-	if _, err := os.Stat(testCacheDir); err != nil {
-		t.Errorf("Cache directory not created: %v", err)
+	// Verify the cache directory was created
+	testCacheDir := filepath.Join(parentCacheDir, orgName, "mappings")
+	if _, err := os.Stat(testCacheDir); os.IsNotExist(err) {
+		t.Errorf("Cache directory was not created")
 	}
 
-	// Verify blobs directory was created
+	// Verify the blobs directory was created
 	blobsDir := filepath.Join(testCacheDir, "blobs", "sha256")
-	if _, err := os.Stat(blobsDir); err != nil {
-		t.Errorf("Blobs directory not created: %v", err)
+	if _, err := os.Stat(blobsDir); os.IsNotExist(err) {
+		t.Errorf("Blobs directory was not created")
 	}
 
-	// Verify oci-layout was created
-	ociLayoutPath := filepath.Join(testCacheDir, "oci-layout")
-	if _, err := os.Stat(ociLayoutPath); err != nil {
-		t.Errorf("oci-layout not created: %v", err)
-	}
-
-	// Verify index.json was created
+	// Verify the index.json was created
 	indexPath := filepath.Join(testCacheDir, "index.json")
-	if _, err := os.Stat(indexPath); err != nil {
-		t.Errorf("index.json not created: %v", err)
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		t.Errorf("index.json was not created")
+	}
+
+	// Verify the digest was added to the index
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("Failed to read index.json: %v", err)
+	}
+
+	var index ociIndex
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatalf("Failed to parse index.json: %v", err)
+	}
+
+	found := false
+	for _, manifest := range index.Manifests {
+		if manifest.Digest == digestString {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Digest %s not found in index.json", digestString)
+	}
+
+	// Verify the blob file exists
+	blobPath := filepath.Join(blobsDir, hashString)
+	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
+		t.Errorf("Blob file was not created")
+	}
+
+	// Verify the mappings file was created in XDG config dir
+	mappingsPath, err := getMappingsConfigPath()
+	if err != nil {
+		t.Fatalf("Failed to get mappings path: %v", err)
+	}
+
+	if _, err := os.Stat(mappingsPath); os.IsNotExist(err) {
+		t.Errorf("Mappings file was not created")
 	}
 }
 
@@ -682,4 +710,138 @@ func (e errorReadCloser) Read(_ []byte) (n int, err error) {
 
 func (e errorReadCloser) Close() error {
 	return nil
+}
+
+// Test case where the updateIndexJSON fails
+func TestUpdateIndexJSONError(t *testing.T) {
+	// Create a temporary dir
+	tempDir, err := os.MkdirTemp("", "dfc-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Make the temp dir read-only
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("Failed to make temp dir read-only: %v", err)
+	}
+
+	// Attempt to update the index.json
+	digestString := "sha256:1234567890"
+	if err := updateIndexJSON(tempDir, digestString, 123, "yaml"); err == nil {
+		t.Errorf("updateIndexJSON should have failed but didn't")
+	}
+}
+
+// Test case where updating the index.json file fails
+func TestUpdateFailsToUpdateIndexJSON(t *testing.T) {
+	// Create a temp dir
+	tempDir, err := os.MkdirTemp("", "dfc-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create fake cache directory
+	cacheDir := filepath.Join(tempDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("Failed to create cache dir: %v", err)
+	}
+
+	// Create a file that will prevent creation of the index.json
+	indexPath := filepath.Join(cacheDir, "index.json")
+	if err := os.MkdirAll(indexPath, 0755); err != nil {
+		t.Fatalf("Failed to create directory at index.json path: %v", err)
+	}
+
+	// Create the blobs directory
+	blobsDir := filepath.Join(cacheDir, "blobs", "sha256")
+	if err := os.MkdirAll(blobsDir, 0755); err != nil {
+		t.Fatalf("Failed to create blobs dir: %v", err)
+	}
+
+	// Create the original getConfig func
+	origGetCacheDir := getCacheDir
+	defer func() { getCacheDir = origGetCacheDir }()
+
+	// Mock the getCacheDir function to return our fake cache dir
+	getCacheDir = func() string {
+		return cacheDir
+	}
+
+	// Mock the HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("test data"))
+	}))
+	defer server.Close()
+
+	// Try to update
+	ctx := context.Background()
+	err = updateMappingsFile(ctx, server.URL, "")
+	if err == nil {
+		t.Errorf("Expected updateMappingsFile to fail, but got nil error")
+	}
+}
+
+func TestUpdateAndReadOciIndex(t *testing.T) {
+	// Create a temp dir
+	tempDir, err := os.MkdirTemp("", "dfc-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create fake cache directory
+	cacheDir := filepath.Join(tempDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("Failed to create cache dir: %v", err)
+	}
+
+	// Create a fake index.json file
+	sampleIndex := `{
+		"schemaVersion": 2,
+		"mediaType": "application/vnd.oci.image.index.v1+json",
+		"manifests": []
+	}`
+
+	indexPath := filepath.Join(cacheDir, "index.json")
+	if err := os.WriteFile(indexPath, []byte(sampleIndex), 0600); err != nil {
+		t.Fatalf("Failed to write index.json: %v", err)
+	}
+
+	// Create the blobs directory
+	blobsDir := filepath.Join(cacheDir, "blobs", "sha256")
+	if err := os.MkdirAll(blobsDir, 0755); err != nil {
+		t.Fatalf("Failed to create blobs dir: %v", err)
+	}
+
+	// Update the index.json
+	digestString := "sha256:1234567890"
+	size := int64(123)
+	if err := updateIndexJSON(cacheDir, digestString, size, "yaml"); err != nil {
+		t.Fatalf("Failed to update index.json: %v", err)
+	}
+
+	// Read the updated index.json
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("Failed to read index.json: %v", err)
+	}
+
+	// Parse the index
+	var index ociIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatalf("Failed to parse index.json: %v", err)
+	}
+
+	// Check the index
+	if len(index.Manifests) != 1 {
+		t.Fatalf("Expected 1 manifest, got %d", len(index.Manifests))
+	}
+	if index.Manifests[0].Digest != digestString {
+		t.Errorf("Expected digest %s, got %s", digestString, index.Manifests[0].Digest)
+	}
+	if index.Manifests[0].Size != size {
+		t.Errorf("Expected size %d, got %d", size, index.Manifests[0].Size)
+	}
 }

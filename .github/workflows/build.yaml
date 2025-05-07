@@ -1,43 +1,78 @@
 # Copyright 2025 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: ci
+name: Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
-
-permissions: {}
+    branches: [ main ]
 
 jobs:
-  build:
-    name: build
+  verify-db:
+    name: Verify SQLite Database
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-
     steps:
-      - uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          egress-policy: audit
+          go-version: 1.24
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify database is in sync with YAML
+        run: |
+          go run cmd/dfc-util/main.go verify-db --log-level debug
+        # This will exit with an error if the database is not in sync
+  
+  lint:
+    needs: verify-db
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version-file: './go.mod'
-          check-latest: true
+          go-version: 1.24
 
-      - name: build
-        run: |
-          set -x
-          go build -o dfc .
-          ./dfc --help
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v5
+        with:
+          version: latest
 
-      - name: test
-        run: |
-          set -x
-          go test -v -cover ./...
+  build:
+    needs: [verify-db, lint]
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24
+
+      - name: Build
+        run: go build -v ./...
+
+  test:
+    needs: [verify-db, lint]
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24
+
+      - name: Run tests
+        run: go test -v ./...

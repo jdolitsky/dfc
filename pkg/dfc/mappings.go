@@ -9,6 +9,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
 
 	"github.com/chainguard-dev/clog"
 	"gopkg.in/yaml.v3"
@@ -34,6 +35,27 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 		}
 	}
 
+	// First try to use SQLite database if available
+	dbPath, err := getDBPath()
+	if err == nil {
+		// Check if the database file exists
+		if fileExists(dbPath) {
+			log.Debug("Using SQLite database from config directory")
+			db, err := OpenDB(ctx)
+			if err == nil {
+				defer db.Close()
+				mappings, err := LoadMappingsFromDB(ctx, db)
+				if err == nil {
+					return mappings, nil
+				}
+				log.Warn("Failed to load mappings from database, will try YAML", "error", err)
+			} else {
+				log.Warn("Failed to open database, will try YAML", "error", err)
+			}
+		}
+	}
+
+	// Fall back to YAML if database is not available or has errors
 	// Try to use XDG config mappings file if available
 	xdgMappings, err := getMappingsConfig()
 	if err != nil {
@@ -42,11 +64,11 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 
 	var mappingsBytes []byte
 	if xdgMappings != nil {
-		log.Debug("Using mappings from XDG config directory")
+		log.Debug("Using YAML mappings from XDG config directory")
 		mappingsBytes = xdgMappings
 	} else {
 		// Fall back to embedded mappings
-		log.Debug("Using embedded builtin mappings")
+		log.Debug("Using embedded builtin mappings (YAML)")
 		mappingsBytes = builtinMappingsYAMLBytes
 	}
 
@@ -56,6 +78,12 @@ func defaultGetDefaultMappings(ctx context.Context, update bool) (MappingsConfig
 	}
 
 	return mappings, nil
+}
+
+// fileExists returns true if the file exists
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // MergeMappings merges the base and overlay mappings
