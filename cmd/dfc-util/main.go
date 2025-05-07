@@ -78,7 +78,7 @@ func cli() *cobra.Command {
 
 			// If input is not specified, use the default builtin-mappings.yaml
 			if input == "" {
-				input = "builtin-mappings.yaml"
+				input = "pkg/dfc/builtin-mappings.yaml"
 				log.Info("Using default input file", "path", input)
 			}
 
@@ -146,7 +146,7 @@ func cli() *cobra.Command {
 				defer cleanupFunc()
 
 				// Generate the database from the current YAML
-				if err := dfc.CreateDBFromYAML(ctx, "builtin-mappings.yaml", tempFile); err != nil {
+				if err := dfc.CreateDBFromYAML(ctx, "pkg/dfc/builtin-mappings.yaml", tempFile); err != nil {
 					return fmt.Errorf("generating temporary database: %w", err)
 				}
 				check = tempFile
@@ -197,7 +197,7 @@ func cli() *cobra.Command {
 
 			// If output is not specified, use the default builtin-mappings.yaml
 			if output == "" {
-				output = "builtin-mappings.yaml"
+				output = "pkg/dfc/builtin-mappings.yaml"
 				log.Info("Using default output file", "path", output)
 			}
 
