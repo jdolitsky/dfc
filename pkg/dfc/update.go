@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/adrg/xdg"
@@ -24,7 +23,7 @@ import (
 
 const (
 	// defaultMappingsURL is the default URL for fetching mappings
-	defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/pkg/dfc/builtin-mappings.yaml"
+	defaultMappingsURL = "https://raw.githubusercontent.com/chainguard-dev/dfc/refs/heads/main/pkg/dfc/builtin-mappings.db"
 
 	// orgName is the organization name used in XDG paths
 	orgName = "dev.chainguard.dfc"
@@ -83,47 +82,6 @@ func getConfigDir() string {
 	return getConfigDirFunc()
 }
 
-// GetMappingsConfigPath returns the path to the builtin-mappings.yaml file in XDG_CONFIG_HOME
-func getMappingsConfigPath() (string, error) {
-	// Use xdg library's ConfigFile to get the proper location
-	mappingsPath, err := xdg.ConfigFile(filepath.Join(orgName, "builtin-mappings.yaml"))
-	if err != nil {
-		return "", fmt.Errorf("getting mappings config path: %w", err)
-	}
-
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(mappingsPath), 0755); err != nil {
-		return "", fmt.Errorf("creating config directory: %w", err)
-	}
-
-	return mappingsPath, nil
-}
-
-// getMappingsConfig reads and returns the contents of the builtin-mappings.yaml file
-func getMappingsConfig() ([]byte, error) {
-	mappingsPath, err := getMappingsConfigPath()
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if the file exists
-	if _, err := os.Stat(mappingsPath); err != nil {
-		if os.IsNotExist(err) {
-			// File doesn't exist, return nil with no error
-			return nil, nil
-		}
-		return nil, fmt.Errorf("checking mappings file: %w", err)
-	}
-
-	// Read the mappings file
-	data, err := os.ReadFile(mappingsPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading mappings file: %w", err)
-	}
-
-	return data, nil
-}
-
 // initOCILayout initializes the OCI layout in the cache directory
 func initOCILayout(cacheDir string) error {
 	// Create the blobs/sha256 directory
@@ -163,7 +121,7 @@ func initOCILayout(cacheDir string) error {
 }
 
 // updateIndexJSON updates the index.json file with the new mapping blob
-func updateIndexJSON(cacheDir, digest string, size int64, fileType string) error {
+func updateIndexJSON(cacheDir, digest string, size int64) error {
 	// Read the current index.json
 	indexPath := filepath.Join(cacheDir, "index.json")
 	indexData, err := os.ReadFile(indexPath)
@@ -197,24 +155,13 @@ func updateIndexJSON(cacheDir, digest string, size int64, fileType string) error
 
 	// Create a new descriptor for the mapping
 	now := time.Now().UTC().Format(time.RFC3339)
-
-	var mediaType string
-	switch fileType {
-	case "yaml":
-		mediaType = "application/yaml"
-	case "db":
-		mediaType = "application/vnd.sqlite3"
-	default:
-		mediaType = "application/octet-stream"
-	}
-
 	descriptor := ociDescriptor{
-		MediaType: mediaType,
+		MediaType: "application/vnd.sqlite3",
 		Digest:    digest,
 		Size:      size,
 		Annotations: map[string]string{
 			"vnd.chainguard.dfc.mappings.downloadedAt": now,
-			"vnd.chainguard.dfc.mappings.type":         fileType,
+			"vnd.chainguard.dfc.mappings.type":         "db",
 		},
 	}
 
@@ -238,7 +185,7 @@ func updateIndexJSON(cacheDir, digest string, size int64, fileType string) error
 // Update checks for available updates to the dfc tool
 func Update(ctx context.Context, opts UpdateOptions) error {
 	log := clog.FromContext(ctx)
-	log.Info("Checking for mappings update...")
+	log.Info("Checking for database update...")
 
 	// Set default MappingsURL if not provided
 	mappingsURL := opts.MappingsURL
@@ -246,43 +193,7 @@ func Update(ctx context.Context, opts UpdateOptions) error {
 		mappingsURL = defaultMappingsURL
 	}
 
-	// Update the YAML file first
-	if err := updateMappingsFile(ctx, mappingsURL, opts.UserAgent); err != nil {
-		return fmt.Errorf("updating YAML mappings: %w", err)
-	}
-
-	// Always update the DB file
-	// Derive the DB URL from the YAML URL
-	var dbURL string
-	if strings.Contains(mappingsURL, ".yaml") {
-		// If URL has .yaml extension, replace it with .db
-		dbURL = strings.TrimSuffix(mappingsURL, ".yaml") + ".db"
-	} else {
-		// If URL has no extension, append /builtin-mappings.db or just .db based on the path
-		if strings.HasSuffix(mappingsURL, "/") {
-			dbURL = mappingsURL + "builtin-mappings.db"
-		} else if strings.Contains(mappingsURL, "/") && !strings.Contains(filepath.Base(mappingsURL), ".") {
-			// URL has a path but no file extension
-			dbURL = mappingsURL + "/builtin-mappings.db"
-		} else {
-			// URL is just a domain or has a specific file without extension
-			dbURL = mappingsURL + ".db"
-		}
-	}
-
-	log.Debug("Using database URL", "url", dbURL)
-
-	if err := updateDatabaseFile(ctx, dbURL, opts.UserAgent); err != nil {
-		return fmt.Errorf("updating database file: %w", err)
-	}
-
-	return nil
-}
-
-// updateMappingsFile downloads and processes the YAML mapping file
-func updateMappingsFile(ctx context.Context, mappingsURL, userAgent string) error {
-	log := clog.FromContext(ctx)
-	log.Info("Updating YAML mappings file", "url", mappingsURL)
+	log.Debug("Using database URL", "url", mappingsURL)
 
 	// Create a new HTTP request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mappingsURL, nil)
@@ -291,142 +202,14 @@ func updateMappingsFile(ctx context.Context, mappingsURL, userAgent string) erro
 	}
 
 	// Set the User-Agent header
-	setUserAgent := userAgent
+	setUserAgent := opts.UserAgent
 	if setUserAgent == "" {
 		setUserAgent = "dfc/dev"
 	}
 	req.Header.Set("User-Agent", setUserAgent)
 
 	// Send the request
-	log.Debug("Fetching mappings", "url", mappingsURL)
-	client := http.DefaultClient
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetching mappings: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check the response status
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
-	// Check if XDG cache directory exists, create it if not
-	cacheDir := getCacheDir()
-	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
-		log.Debug("Creating cache directory", "path", cacheDir)
-		if err := os.MkdirAll(cacheDir, 0755); err != nil {
-			return fmt.Errorf("creating cache directory: %w", err)
-		}
-		if err := initOCILayout(cacheDir); err != nil {
-			return fmt.Errorf("initializing OCI layout: %w", err)
-		}
-	}
-
-	// Calculate SHA-256 hash of the mapping file
-	hash := sha256.New()
-	hash.Write(body)
-	hashBytes := hash.Sum(nil)
-	hashString := hex.EncodeToString(hashBytes)
-	digestString := "sha256:" + hashString
-
-	// Create the path to store the mapping file
-	blobPath := filepath.Join(cacheDir, "blobs", "sha256", hashString)
-
-	// Check if the file already exists
-	if _, err := os.Stat(blobPath); err == nil {
-		// Get the XDG config directory for the symlink
-		configDir := getConfigDir()
-
-		// Ensure the nested config directory exists
-		nestedConfigDir := filepath.Join(configDir, orgName)
-		if err := os.MkdirAll(nestedConfigDir, 0755); err != nil {
-			return fmt.Errorf("creating nested config directory: %w", err)
-		}
-
-		// Check if the symlink exists and points to the correct file
-		symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
-		currentTarget, err := os.Readlink(symlinkPath)
-		if err != nil || currentTarget != blobPath {
-			// Remove existing symlink if it exists
-			_ = os.Remove(symlinkPath)
-			// Create new symlink
-			if err := os.Symlink(blobPath, symlinkPath); err != nil {
-				return fmt.Errorf("creating symlink: %w", err)
-			}
-		}
-
-		log.Info("Already have latest YAML mappings", "location", symlinkPath)
-	} else {
-		log.Info("Saving latest version of YAML mappings", "location", blobPath)
-
-		// Save the mapping file
-		blobsDir := filepath.Join(cacheDir, "blobs", "sha256")
-		if err := os.MkdirAll(blobsDir, 0755); err != nil {
-			return fmt.Errorf("creating blobs directory: %w", err)
-		}
-
-		if err := os.WriteFile(blobPath, body, 0600); err != nil {
-			return fmt.Errorf("writing mapping file: %w", err)
-		}
-
-		// Update the index.json file
-		if err := updateIndexJSON(cacheDir, digestString, int64(len(body)), "yaml"); err != nil {
-			return fmt.Errorf("updating index.json: %w", err)
-		}
-
-		// Get the XDG config directory for the symlink
-		configDir := getConfigDir()
-
-		// Ensure the nested config directory exists
-		nestedConfigDir := filepath.Join(configDir, orgName)
-		if err := os.MkdirAll(nestedConfigDir, 0755); err != nil {
-			return fmt.Errorf("creating nested config directory: %w", err)
-		}
-
-		// Create or update the symlink to point to the latest mappings file
-		symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
-		log.Info("Created symlink to latest YAML mappings", "location", symlinkPath)
-
-		// Remove existing symlink if it exists
-		_ = os.Remove(symlinkPath)
-		// Create new symlink
-		if err := os.Symlink(blobPath, symlinkPath); err != nil {
-			return fmt.Errorf("creating symlink: %w", err)
-		}
-	}
-
-	log.Info("YAML mappings checksum", "sha256", hashString)
-
-	return nil
-}
-
-// updateDatabaseFile downloads and processes the SQLite database file
-func updateDatabaseFile(ctx context.Context, dbURL, userAgent string) error {
-	log := clog.FromContext(ctx)
-	log.Info("Updating SQLite database file", "url", dbURL)
-
-	// Create a new HTTP request
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dbURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-
-	// Set the User-Agent header
-	setUserAgent := userAgent
-	if setUserAgent == "" {
-		setUserAgent = "dfc/dev"
-	}
-	req.Header.Set("User-Agent", setUserAgent)
-
-	// Send the request
-	log.Debug("Fetching database", "url", dbURL)
+	log.Debug("Fetching database", "url", mappingsURL)
 	client := http.DefaultClient
 	resp, err := client.Do(req)
 	if err != nil {
@@ -505,7 +288,7 @@ func updateDatabaseFile(ctx context.Context, dbURL, userAgent string) error {
 		}
 
 		// Update the index.json file
-		if err := updateIndexJSON(cacheDir, digestString, int64(len(body)), "db"); err != nil {
+		if err := updateIndexJSON(cacheDir, digestString, int64(len(body))); err != nil {
 			return fmt.Errorf("updating index.json: %w", err)
 		}
 

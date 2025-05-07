@@ -187,49 +187,17 @@ func TestPathsUseTestDirectories(t *testing.T) {
 		t.Errorf("GetConfigDir() = %v contains real home dir %v", gotConfigDir, realHome)
 	}
 
-	// Check mappings path
-	mappingsPath, err := getMappingsConfigPath()
+	// Check DB path
+	dbPath, err := getDBPath()
 	if err != nil {
-		t.Fatalf("GetMappingsConfigPath() error = %v", err)
+		t.Fatalf("getDBPath() error = %v", err)
 	}
 
-	if !strings.Contains(mappingsPath, configDir) {
-		t.Errorf("GetMappingsConfigPath() = %v, expected to contain test dir %v", mappingsPath, configDir)
+	if !strings.Contains(dbPath, configDir) {
+		t.Errorf("getDBPath() = %v, expected to contain test dir %v", dbPath, configDir)
 	}
-	if !strings.HasSuffix(mappingsPath, "builtin-mappings.yaml") {
-		t.Errorf("GetMappingsConfigPath() = %v, expected to end with builtin-mappings.yaml", mappingsPath)
-	}
-}
-
-// TestGetMappingsConfig tests the GetMappingsConfig function
-func TestGetMappingsConfig(t *testing.T) {
-	_, configDir, _ := setupTestEnvironment(t)
-
-	// Test when file doesn't exist
-	mappings, err := getMappingsConfig()
-	if err != nil {
-		t.Fatalf("GetMappingsConfig() error = %v when file doesn't exist", err)
-	}
-	if mappings != nil {
-		t.Errorf("GetMappingsConfig() = %v, want nil when file doesn't exist", mappings)
-	}
-
-	// Create mappings file
-	mappingsPath := filepath.Join(configDir, orgName, "builtin-mappings.yaml")
-	if err := os.MkdirAll(filepath.Dir(mappingsPath), 0755); err != nil {
-		t.Fatalf("Failed to create directories: %v", err)
-	}
-	if err := os.WriteFile(mappingsPath, []byte(testMappingsYAML), 0600); err != nil {
-		t.Fatalf("Failed to write mappings file: %v", err)
-	}
-
-	// Test when file exists
-	mappings, err = getMappingsConfig()
-	if err != nil {
-		t.Fatalf("GetMappingsConfig() error = %v when file exists", err)
-	}
-	if string(mappings) != testMappingsYAML {
-		t.Errorf("GetMappingsConfig() = %v, want %v", string(mappings), testMappingsYAML)
+	if !strings.HasSuffix(dbPath, "builtin-mappings.db") {
+		t.Errorf("getDBPath() = %v, expected to end with builtin-mappings.db", dbPath)
 	}
 }
 
@@ -270,7 +238,7 @@ func TestUpdateIndexJSON(t *testing.T) {
 	testSize := int64(1024)
 
 	// Test adding an entry
-	if err := updateIndexJSON(testCacheDir, testDigest, testSize, "yaml"); err != nil {
+	if err := updateIndexJSON(testCacheDir, testDigest, testSize); err != nil {
 		t.Fatalf("updateIndexJSON() error = %v", err)
 	}
 
@@ -300,7 +268,7 @@ func TestUpdateIndexJSON(t *testing.T) {
 	}
 
 	// Test replacing an entry with the same digest but different size
-	if err := updateIndexJSON(testCacheDir, testDigest, testSize+10, "yaml"); err != nil {
+	if err := updateIndexJSON(testCacheDir, testDigest, testSize+10); err != nil {
 		t.Fatalf("updateIndexJSON() error = %v", err)
 	}
 
@@ -350,7 +318,7 @@ func TestUpdateWithCancelledContext(t *testing.T) {
 	cancel() // Cancel immediately
 
 	opts := UpdateOptions{
-		MappingsURL: "https://example.com/builtin-mappings.yaml",
+		MappingsURL: "https://example.com/builtin-mappings.db",
 	}
 
 	err := Update(ctx, opts)
@@ -364,7 +332,7 @@ func TestUpdateEmptyBody(t *testing.T) {
 	setupTestEnvironment(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/builtin-mappings.yaml" || r.URL.Path == "/builtin-mappings.db" {
+		if r.URL.Path == "/builtin-mappings.db" {
 			w.WriteHeader(http.StatusOK)
 			// Write an empty body
 		} else {
@@ -374,7 +342,7 @@ func TestUpdateEmptyBody(t *testing.T) {
 	defer server.Close()
 
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/builtin-mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.db",
 	}
 
 	err := Update(context.Background(), opts)
@@ -395,7 +363,7 @@ func TestUpdateEmptyBody(t *testing.T) {
 
 	// Check if symlink was created
 	configDir := getConfigDir()
-	symlinkPath := filepath.Join(configDir, orgName, "builtin-mappings.yaml")
+	symlinkPath := filepath.Join(configDir, orgName, "builtin-mappings.db")
 	if _, err := os.Stat(symlinkPath); err != nil {
 		t.Errorf("Symlink not created: %v", err)
 	}
@@ -425,7 +393,7 @@ func TestUpdateWithBlockedWrite(t *testing.T) {
 	defer os.Chmod(cacheDir, 0755) // Restore permissions
 
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/builtin-mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.db",
 	}
 
 	err := Update(context.Background(), opts)
@@ -441,14 +409,7 @@ func TestUpdateWithCustomUserAgent(t *testing.T) {
 	var receivedUserAgent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedUserAgent = r.Header.Get("User-Agent")
-		if r.URL.Path == "/builtin-mappings.yaml" {
-			w.Header().Set("Content-Type", "text/yaml")
-			w.WriteHeader(http.StatusOK)
-			_, err := w.Write([]byte(testMappingsYAML))
-			if err != nil {
-				t.Fatalf("Failed to write response: %v", err)
-			}
-		} else if r.URL.Path == "/builtin-mappings.db" {
+		if r.URL.Path == "/builtin-mappings.db" {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(http.StatusOK)
 			_, err := w.Write([]byte("MOCK_DATABASE_CONTENT"))
@@ -464,7 +425,7 @@ func TestUpdateWithCustomUserAgent(t *testing.T) {
 	// Update with custom UserAgent
 	customUserAgent := "dfc/test-version"
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/builtin-mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.db",
 		UserAgent:   customUserAgent,
 	}
 
@@ -479,28 +440,6 @@ func TestUpdateWithCustomUserAgent(t *testing.T) {
 	}
 }
 
-// TestGetMappingsConfigPath_CreateDirectory tests the directory creation in GetMappingsConfigPath
-func TestGetMappingsConfigPath_CreateDirectory(t *testing.T) {
-	_, configDir, _ := setupTestEnvironment(t)
-
-	// Delete any existing directory
-	orgDir := filepath.Join(configDir, orgName)
-	if err := os.RemoveAll(orgDir); err != nil {
-		t.Fatalf("Failed to clean org directory: %v", err)
-	}
-
-	// GetMappingsConfigPath should create the directory
-	path, err := getMappingsConfigPath()
-	if err != nil {
-		t.Fatalf("GetMappingsConfigPath() error = %v", err)
-	}
-
-	// Check if directory was created
-	if _, err := os.Stat(filepath.Dir(path)); err != nil {
-		t.Errorf("Directory not created: %v", err)
-	}
-}
-
 // TestUpdate_RecreateSymlink tests that the symlink is recreated
 func TestUpdate_RecreateSymlink(t *testing.T) {
 	// Create test environment
@@ -509,8 +448,8 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 	// Setup server
 	server := setupTestServer(t)
 
-	// Calculate hash of test mappings
-	hash := sha256.Sum256([]byte(testMappingsYAML))
+	// Calculate hash of test db content
+	hash := sha256.Sum256([]byte("MOCK_DATABASE_CONTENT"))
 	hashString := hex.EncodeToString(hash[:])
 	digestString := "sha256:" + hashString
 
@@ -531,14 +470,14 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 		t.Fatalf("Failed to create blobs directory: %v", err)
 	}
 
-	// Create the mapping blob
+	// Create the database blob
 	blobPath := filepath.Join(blobsDir, hashString)
-	if err := os.WriteFile(blobPath, []byte(testMappingsYAML), 0600); err != nil {
+	if err := os.WriteFile(blobPath, []byte("MOCK_DATABASE_CONTENT"), 0600); err != nil {
 		t.Fatalf("Failed to write blob: %v", err)
 	}
 
 	// Update index.json
-	if err := updateIndexJSON(testCacheDir, digestString, int64(len(testMappingsYAML)), "yaml"); err != nil {
+	if err := updateIndexJSON(testCacheDir, digestString, int64(len("MOCK_DATABASE_CONTENT"))); err != nil {
 		t.Fatalf("Failed to update index.json: %v", err)
 	}
 
@@ -554,14 +493,14 @@ func TestUpdate_RecreateSymlink(t *testing.T) {
 		t.Fatalf("Failed to create wrong file: %v", err)
 	}
 
-	symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.yaml")
+	symlinkPath := filepath.Join(nestedConfigDir, "builtin-mappings.db")
 	if err := os.Symlink(wrongFile, symlinkPath); err != nil {
 		t.Fatalf("Failed to create symlink: %v", err)
 	}
 
 	// Run update
 	opts := UpdateOptions{
-		MappingsURL: server.URL + "/builtin-mappings.yaml",
+		MappingsURL: server.URL + "/builtin-mappings.db",
 	}
 
 	err := Update(context.Background(), opts)
@@ -595,7 +534,7 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 
 	// Create test server
 	server := setupTestServer(t)
-	url := fmt.Sprintf("%s/builtin-mappings.yaml", server.URL)
+	url := fmt.Sprintf("%s/builtin-mappings.db", server.URL)
 
 	// Override the getCacheDirFunc variable to return our test directory
 	origGetCacheDirFunc := getCacheDirFunc
@@ -604,16 +543,12 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 		return filepath.Join(parentCacheDir, orgName, "mappings")
 	}
 
-	// Calculate the expected digest
-	hash := sha256.New()
-	hash.Write([]byte(testMappingsYAML))
-	hashBytes := hash.Sum(nil)
-	hashString := hex.EncodeToString(hashBytes)
-	digestString := "sha256:" + hashString
-
 	// Run the update
 	ctx := context.Background()
-	err := updateMappingsFile(ctx, url, "")
+	opts := UpdateOptions{
+		MappingsURL: url,
+	}
+	err := Update(ctx, opts)
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -635,6 +570,11 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
 		t.Errorf("index.json was not created")
 	}
+
+	// Calculate the expected digest
+	hash := sha256.Sum256([]byte("MOCK_DATABASE_CONTENT"))
+	hashString := hex.EncodeToString(hash[:])
+	digestString := "sha256:" + hashString
 
 	// Verify the digest was added to the index
 	indexData, err := os.ReadFile(indexPath)
@@ -665,14 +605,14 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 		t.Errorf("Blob file was not created")
 	}
 
-	// Verify the mappings file was created in XDG config dir
-	mappingsPath, err := getMappingsConfigPath()
+	// Verify the db file was created in XDG config dir
+	dbPath, err := getDBPath()
 	if err != nil {
-		t.Fatalf("Failed to get mappings path: %v", err)
+		t.Fatalf("Failed to get db path: %v", err)
 	}
 
-	if _, err := os.Stat(mappingsPath); os.IsNotExist(err) {
-		t.Errorf("Mappings file was not created")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		t.Errorf("Database file was not created")
 	}
 }
 
@@ -720,7 +660,7 @@ func TestUpdate_ResponseBodyReadError(t *testing.T) {
 	}
 
 	opts := UpdateOptions{
-		MappingsURL: "https://example.com/builtin-mappings.yaml",
+		MappingsURL: "https://example.com/builtin-mappings.db",
 	}
 
 	err := Update(context.Background(), opts)
@@ -756,7 +696,7 @@ func TestUpdateIndexJSONError(t *testing.T) {
 
 	// Attempt to update the index.json
 	digestString := "sha256:1234567890"
-	if err := updateIndexJSON(tempDir, digestString, 123, "yaml"); err == nil {
+	if err := updateIndexJSON(tempDir, digestString, 123); err == nil {
 		t.Errorf("updateIndexJSON should have failed but didn't")
 	}
 }
@@ -805,9 +745,12 @@ func TestUpdateFailsToUpdateIndexJSON(t *testing.T) {
 
 	// Try to update
 	ctx := context.Background()
-	err = updateMappingsFile(ctx, server.URL, "")
+	opts := UpdateOptions{
+		MappingsURL: server.URL,
+	}
+	err = Update(ctx, opts)
 	if err == nil {
-		t.Errorf("Expected updateMappingsFile to fail, but got nil error")
+		t.Errorf("Expected Update to fail, but got nil error")
 	}
 }
 
@@ -846,7 +789,7 @@ func TestUpdateAndReadOciIndex(t *testing.T) {
 	// Update the index.json
 	digestString := "sha256:1234567890"
 	size := int64(123)
-	if err := updateIndexJSON(cacheDir, digestString, size, "yaml"); err != nil {
+	if err := updateIndexJSON(cacheDir, digestString, size); err != nil {
 		t.Fatalf("Failed to update index.json: %v", err)
 	}
 
