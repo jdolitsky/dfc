@@ -104,35 +104,44 @@ func getDBBytes() ([]byte, error) {
 
 // OpenDB opens a connection to the SQLite database
 // If the database doesn't exist, it falls back to the embedded database
-func OpenDB(ctx context.Context) (*DBConnection, error) {
+// If a custom path is provided, it will open that database instead
+func OpenDB(ctx context.Context, customPath ...string) (*DBConnection, error) {
 	log := clog.FromContext(ctx)
 
-	// Try to get the database from the XDG config directory
-	dbPath, err := getDBPath()
-	if err != nil {
-		return nil, fmt.Errorf("getting db path: %w", err)
-	}
+	var dbPath string
+	if len(customPath) > 0 && customPath[0] != "" {
+		// Use the provided custom path
+		dbPath = customPath[0]
+		log.Debug("Using custom database path", "path", dbPath)
+	} else {
+		// Try to get the database from the XDG config directory
+		var err error
+		dbPath, err = getDBPath()
+		if err != nil {
+			return nil, fmt.Errorf("getting db path: %w", err)
+		}
 
-	// Check if the file exists
-	if _, err := os.Stat(dbPath); err != nil {
-		if os.IsNotExist(err) {
-			// If it doesn't exist, create a new db file using the embedded database
-			log.Debug("Creating new database from embedded db")
+		// Check if the file exists
+		if _, err := os.Stat(dbPath); err != nil {
+			if os.IsNotExist(err) {
+				// If it doesn't exist, create a new db file using the embedded database
+				log.Debug("Creating new database from embedded db")
 
-			// Get the embedded database bytes
-			dbBytes, err := getEmbeddedDBBytes()
-			if err != nil {
-				return nil, fmt.Errorf("reading embedded db: %w", err)
-			}
+				// Get the embedded database bytes
+				dbBytes, err := getEmbeddedDBBytes()
+				if err != nil {
+					return nil, fmt.Errorf("reading embedded db: %w", err)
+				}
 
-			if err := os.WriteFile(dbPath, dbBytes, 0600); err != nil {
-				return nil, fmt.Errorf("writing embedded db: %w", err)
+				if err := os.WriteFile(dbPath, dbBytes, 0600); err != nil {
+					return nil, fmt.Errorf("writing embedded db: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("checking db file: %w", err)
 			}
 		} else {
-			return nil, fmt.Errorf("checking db file: %w", err)
+			log.Debug("Using existing database", "path", dbPath)
 		}
-	} else {
-		log.Debug("Using existing database", "path", dbPath)
 	}
 
 	// Open the database

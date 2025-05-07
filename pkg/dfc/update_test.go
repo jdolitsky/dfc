@@ -569,10 +569,10 @@ func TestUpdate_CreateCacheDirectories(t *testing.T) {
 	server := setupTestServer(t)
 	url := fmt.Sprintf("%s/builtin-mappings.yaml", server.URL)
 
-	// Override the getCacheDir function to return our test directory
-	origGetCacheDir := getCacheDir
-	defer func() { getCacheDir = origGetCacheDir }()
-	getCacheDir = func() string {
+	// Override the getCacheDirFunc variable to return our test directory
+	origGetCacheDirFunc := getCacheDirFunc
+	defer func() { getCacheDirFunc = origGetCacheDirFunc }()
+	getCacheDirFunc = func() string {
 		return filepath.Join(parentCacheDir, orgName, "mappings")
 	}
 
@@ -760,12 +760,12 @@ func TestUpdateFailsToUpdateIndexJSON(t *testing.T) {
 		t.Fatalf("Failed to create blobs dir: %v", err)
 	}
 
-	// Create the original getConfig func
-	origGetCacheDir := getCacheDir
-	defer func() { getCacheDir = origGetCacheDir }()
+	// Create the original getCacheDirFunc
+	origGetCacheDirFunc := getCacheDirFunc
+	defer func() { getCacheDirFunc = origGetCacheDirFunc }()
 
-	// Mock the getCacheDir function to return our fake cache dir
-	getCacheDir = func() string {
+	// Mock the getCacheDirFunc variable to return our fake cache dir
+	getCacheDirFunc = func() string {
 		return cacheDir
 	}
 

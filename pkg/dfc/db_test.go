@@ -55,7 +55,7 @@ packages:
 	}
 
 	// Open the database
-	db, err := OpenDB(ctx)
+	db, err := OpenDB(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
