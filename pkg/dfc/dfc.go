@@ -480,9 +480,6 @@ func parseImageReference(imageRef string) (base, tag string) {
 
 // Convert applies the conversion to the Dockerfile and returns a new converted Dockerfile
 func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, error) {
-	// if opts.Strict {
-	// 	return nil, fmt.Errorf("todo Eliza :)")
-	// }
 	// Initialize mappings
 	var mappings MappingsConfig
 
