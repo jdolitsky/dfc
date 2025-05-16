@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1964,6 +1965,295 @@ func TestStrictMode(t *testing.T) {
 			gotErr := convertErr != nil
 			if gotErr != tt.wantErr {
 				t.Errorf("%s: wanted %t got %t", tt.name, tt.wantErr, gotErr)
+			}
+		})
+	}
+}
+
+func TestParsePackageSpec(t *testing.T) {
+	type args struct {
+		manager    Manager
+		packageArg string
+	}
+	tests := []struct {
+		name     string
+		args     args
+		wantSpec PackageSpec
+	}{
+		{
+			name:     "apk name only",
+			args:     args{manager: ManagerApk, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3"},
+		},
+		{
+			name:     "apk with tag",
+			args:     args{manager: ManagerApk, packageArg: "foo-3@bar"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Tag: "bar"},
+		},
+		{
+			name:     "apk with tag and version",
+			args:     args{manager: ManagerApk, packageArg: "foo-3@bar>1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Tag: "bar", Version: "1.0.0", VersionMatcher: ">"},
+		},
+		{
+			name:     "apk with version =",
+			args:     args{manager: ManagerApk, packageArg: "foo-3=1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "="},
+		},
+		{
+			name:     "apk with version >",
+			args:     args{manager: ManagerApk, packageArg: "foo-3>1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: ">"},
+		},
+		{
+			name:     "apk with version <",
+			args:     args{manager: ManagerApk, packageArg: "foo-3<1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "<"},
+		},
+		{
+			name:     "apk with version ~=",
+			args:     args{manager: ManagerApk, packageArg: "foo-3~=1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "~="},
+		},
+		{
+			name:     "apk with version =~",
+			args:     args{manager: ManagerApk, packageArg: "foo-3=~1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "=~"},
+		},
+		{
+			name:     "apk with version ~",
+			args:     args{manager: ManagerApk, packageArg: "foo-3~1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "~"},
+		},
+		{
+			name:     "apk with version release",
+			args:     args{manager: ManagerApk, packageArg: "foo-3=1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerApk, Name: "foo-3", Version: "1.0.0", VersionMatcher: "=", Release: "r0"},
+		},
+		{
+			name:     "apt-get name only",
+			args:     args{manager: ManagerAptGet, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerAptGet, Name: "foo-3"},
+		},
+		{
+			name:     "apt-get with version =",
+			args:     args{manager: ManagerAptGet, packageArg: "foo-3=1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerAptGet, Name: "foo-3", Version: "1.0.0", VersionMatcher: "="},
+		},
+		{
+			name:     "apt-get with version release",
+			args:     args{manager: ManagerAptGet, packageArg: "foo-3=1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerAptGet, Name: "foo-3", Version: "1.0.0", VersionMatcher: "=", Release: "r0"},
+		},
+		{
+			name:     "apt name only",
+			args:     args{manager: ManagerApt, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3"},
+		},
+		{
+			name:     "apt with version =",
+			args:     args{manager: ManagerApt, packageArg: "foo-3=1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3", Version: "1.0.0", VersionMatcher: "="},
+		},
+		{
+			name:     "apt with version release",
+			args:     args{manager: ManagerApt, packageArg: "foo-3=1.5-1~deb10u1"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3", Version: "1.5", VersionMatcher: "=", Release: "1~deb10u1"},
+		},
+		{
+			name:     "apt with version include hyphen and release",
+			args:     args{manager: ManagerApt, packageArg: "foo-3=1.0.0-1-r0"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3", Version: "1.0.0-1", VersionMatcher: "=", Release: "r0"},
+		},
+		{
+			name:     "apt with version epoch",
+			args:     args{manager: ManagerApt, packageArg: "foo-3=1:1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3", Epoch: "1", Version: "1.0.0", VersionMatcher: "="},
+		},
+		{
+			name:     "apt with version epoch and release",
+			args:     args{manager: ManagerApt, packageArg: "foo-3=1:1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerApt, Name: "foo-3", Epoch: "1", Version: "1.0.0", VersionMatcher: "=", Release: "r0"},
+		},
+		{
+			name:     "yum name only",
+			args:     args{manager: ManagerYum, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerYum, Name: "foo-3"},
+		},
+		{
+			name:     "yum with version",
+			args:     args{manager: ManagerYum, packageArg: "foo-3-1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerYum, Name: "foo-3-1.0.0"},
+		},
+		{
+			name:     "yum with version release",
+			args:     args{manager: ManagerYum, packageArg: "foo-3-1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerYum, Name: "foo-3-1.0.0-r0"},
+		},
+		{
+			name:     "dnf name only",
+			args:     args{manager: ManagerDnf, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerDnf, Name: "foo-3"},
+		},
+		{
+			name:     "dnf with version",
+			args:     args{manager: ManagerDnf, packageArg: "foo-3-1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerDnf, Name: "foo-3-1.0.0"},
+		},
+		{
+			name:     "dnf with version release",
+			args:     args{manager: ManagerDnf, packageArg: "foo-3-1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerDnf, Name: "foo-3-1.0.0-r0"},
+		},
+		{
+			name:     "microdnf name only",
+			args:     args{manager: ManagerMicrodnf, packageArg: "foo-3"},
+			wantSpec: PackageSpec{Manager: ManagerMicrodnf, Name: "foo-3"},
+		},
+		{
+			name:     "microdnf with version",
+			args:     args{manager: ManagerMicrodnf, packageArg: "foo-3-1.0.0"},
+			wantSpec: PackageSpec{Manager: ManagerMicrodnf, Name: "foo-3-1.0.0"},
+		},
+		{
+			name:     "microdnf with version release",
+			args:     args{manager: ManagerMicrodnf, packageArg: "foo-3-1.0.0-r0"},
+			wantSpec: PackageSpec{Manager: ManagerMicrodnf, Name: "foo-3-1.0.0-r0"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if gotSpec := parsePackageSpec(tt.args.manager, tt.args.packageArg); !reflect.DeepEqual(gotSpec, tt.wantSpec) {
+				t.Errorf("parsePackageSpec() = %v, want %v", gotSpec, tt.wantSpec)
+			}
+		})
+	}
+}
+
+func TestConvertPackage(t *testing.T) {
+	type args struct {
+		spec   PackageSpec
+		distro Distro
+	}
+	tests := []struct {
+		name string
+		args args
+		want []string
+	}{
+		{
+			name: "no distro entry",
+			args: args{distro: Distro("foobar"), spec: PackageSpec{Name: "fuse"}},
+			want: []string{"fuse"},
+		},
+		{
+			name: "no package mapping",
+			args: args{distro: DistroDebian, spec: PackageSpec{Name: "foobar"}},
+			want: []string{"foobar"},
+		},
+		{
+			name: "no package mapping with version",
+			args: args{distro: DistroDebian, spec: PackageSpec{Name: "foobar", Version: "1.0.0"}},
+			want: []string{"foobar=~1.0.0"},
+		},
+		{
+			name: "with package mappings",
+			args: args{distro: DistroDebian, spec: PackageSpec{Name: "fuse", Version: "2.0.0"}},
+			want: []string{"fuse2=~2.0.0", "fuse-common=~2.0.0"},
+		},
+		{
+			name: "drop version release",
+			args: args{distro: DistroDebian, spec: PackageSpec{Manager: ManagerAptGet, Name: "fuse", Version: "2.0.0", VersionMatcher: "=", Release: "r0"}},
+			want: []string{"fuse2=~2.0.0", "fuse-common=~2.0.0"},
+		},
+	}
+	pm := PackageMap{
+		DistroDebian: {
+			"fuse": []string{"fuse2", "fuse-common"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := convertPackage(tt.args.spec, tt.args.distro, pm, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("convertPackage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateApkPackageSpec(t *testing.T) {
+	type args struct {
+		name string
+		spec PackageSpec
+	}
+	tests := []struct {
+		name string
+		args args
+		want string
+	}{
+		{
+			name: "name only",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerAptGet, Name: "foo"}},
+			want: "bar",
+		},
+		{
+			name: "apt with version",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerAptGet, Name: "foo", Version: "1.0.0", VersionMatcher: "="}},
+			want: "bar=~1.0.0",
+		},
+		{
+			name: "apt with version release",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerAptGet, Name: "foo", Version: "1.0.0", VersionMatcher: "=", Release: "r0"}},
+			want: "bar=~1.0.0",
+		},
+		{
+			name: "apt with version epoch",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerAptGet, Name: "foo", Epoch: "1", Version: "1.0.0", VersionMatcher: "="}},
+			want: "bar=~1.0.0",
+		},
+		{
+			name: "apk with version >",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Version: "1.0.0", VersionMatcher: ">"}},
+			want: "bar>1.0.0",
+		},
+		{
+			name: "apk with version =",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Version: "1.0.0", VersionMatcher: "="}},
+			want: "bar=~1.0.0",
+		},
+		{
+			name: "apk with version ~=",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Version: "1.0.0", VersionMatcher: "~="}},
+			want: "bar~=1.0.0",
+		},
+		{
+			name: "apk with version ~",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Version: "1.0.0", VersionMatcher: "~"}},
+			want: "bar~1.0.0",
+		},
+		{
+			name: "apk with version release",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Version: "1.0.0", VersionMatcher: "=", Release: "r0"}},
+			want: "bar=~1.0.0",
+		},
+		{
+			name: "apk with tag",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Tag: "alpha"}},
+			want: "bar@alpha",
+		},
+		{
+			name: "apk with tag and version",
+			args: args{name: "bar", spec: PackageSpec{Manager: ManagerApk, Name: "foo", Tag: "alpha", Version: "1.0.0", VersionMatcher: ">"}},
+			want: "bar@alpha>1.0.0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := createApkPackageSpec(tt.args.name, tt.args.spec); got != tt.want {
+				t.Errorf("createApkPackageSpec() = %v, want %v", got, tt.want)
 			}
 		})
 	}

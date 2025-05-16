@@ -242,6 +242,7 @@ packages:
         ssh:
             - openssh-client
             - openssh-server
+        software-properties-common: []
         uuid-runtime:
             - util-linux-misc
         watch:

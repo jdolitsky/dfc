@@ -7,8 +7,7 @@ USER root
 ARG HUGO_VERSION=0.126.3
 ARG GO_VERSION=1.22.3
 
-RUN apk add --no-cache ca-certificates curl git make openssl && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates curl git make openssl
 
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ] ; \
