@@ -1952,7 +1952,6 @@ func TestStrictMode(t *testing.T) {
 	}
 	for _, tt := range convertTests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			ctx := context.Background()
 			parsed, err := ParseDockerfile(ctx, []byte(tt.raw))
 			if err != nil {
