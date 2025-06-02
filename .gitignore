@@ -4,6 +4,3 @@ coverage.*
 *.yaml
 .idea
 .DS_Store
-
-# Test client binary
-test_client/test_client
