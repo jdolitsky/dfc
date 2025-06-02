@@ -137,7 +137,8 @@ type FromDetails struct {
 	Parent      int    `json:"parent,omitempty"`
 	BaseDynamic bool   `json:"baseDynamic,omitempty"`
 	TagDynamic  bool   `json:"tagDynamic,omitempty"`
-	Orig        string `json:"orig,omitempty"` // Original full image reference
+	Orig        string `json:"orig,omitempty"`     // Original full image reference
+	Platform    string `json:"platform,omitempty"` // Platform specification from --platform flag
 }
 
 // RunDetails holds details about a RUN directive
@@ -227,6 +228,27 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 			fromPartIdx := len(DirectiveFrom + " ")
 			fromPart := strings.TrimSpace(trimmedInstruction[fromPartIdx:])
 
+			// Check for --platform flag first
+			var platform string
+			if strings.HasPrefix(fromPart, "--platform") {
+				// Handle --platform=value format
+				if strings.HasPrefix(fromPart, "--platform=") {
+					parts := strings.SplitN(fromPart, " ", 2)
+					if len(parts) >= 2 {
+						platformPart := parts[0]
+						platform = strings.TrimPrefix(platformPart, "--platform=")
+						fromPart = strings.TrimSpace(parts[1])
+					}
+				} else if strings.HasPrefix(fromPart, "--platform ") {
+					// Handle --platform value format (with space)
+					parts := strings.SplitN(fromPart, " ", 3)
+					if len(parts) >= 3 {
+						platform = parts[1]
+						fromPart = strings.TrimSpace(strings.Join(parts[2:], " "))
+					}
+				}
+			}
+
 			// Check for AS clause which defines an alias (case-insensitive)
 			var alias string
 			// Capture space + AS + space to get exact length
@@ -288,6 +310,7 @@ func ParseDockerfile(_ context.Context, content []byte) (*Dockerfile, error) {
 				BaseDynamic: strings.Contains(base, "$"),
 				TagDynamic:  strings.Contains(tag, "$"),
 				Orig:        origImageRef,
+				Platform:    platform,
 			}
 		}
 
@@ -658,6 +681,7 @@ func copyFromDetails(from *FromDetails) *FromDetails {
 		BaseDynamic: from.BaseDynamic,
 		TagDynamic:  from.TagDynamic,
 		Orig:        from.Orig,
+		Platform:    from.Platform,
 	}
 }
 
@@ -769,7 +793,11 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 		customImageRef, err := opts.FromLineConverter(from, chainguardImageRef, stagesWithRunCommands[stage])
 		if err != nil {
 			// If an error occurs, still return a valid FROM line using the original image
-			fromLine := DirectiveFrom + " " + from.Orig
+			fromLine := DirectiveFrom
+			if from.Platform != "" {
+				fromLine += " --platform=" + from.Platform
+			}
+			fromLine += " " + from.Orig
 			if from.Alias != "" {
 				fromLine += " " + KeywordAs + " " + from.Alias
 			}
@@ -777,7 +805,11 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 		}
 
 		// Create the converted FROM line with the custom image
-		fromLine := DirectiveFrom + " " + customImageRef
+		fromLine := DirectiveFrom
+		if from.Platform != "" {
+			fromLine += " --platform=" + from.Platform
+		}
+		fromLine += " " + customImageRef
 		if from.Alias != "" {
 			fromLine += " " + KeywordAs + " " + from.Alias
 		}
@@ -785,7 +817,11 @@ func convertFromLine(from *FromDetails, stage int, stagesWithRunCommands map[int
 	}
 
 	// If no custom converter, use the Chainguard converted reference
-	fromLine := DirectiveFrom + " " + chainguardImageRef
+	fromLine := DirectiveFrom
+	if from.Platform != "" {
+		fromLine += " --platform=" + from.Platform
+	}
+	fromLine += " " + chainguardImageRef
 	if from.Alias != "" {
 		fromLine += " " + KeywordAs + " " + from.Alias
 	}
