@@ -5,8 +5,5 @@ coverage.*
 .idea
 .DS_Store
 
-# Binaries
-mcp-server
-
 # Test client binary
 test_client/test_client
