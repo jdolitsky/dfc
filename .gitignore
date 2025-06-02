@@ -2,3 +2,5 @@
 /dfc
 coverage.*
 *.yaml
+.idea
+.DS_Store

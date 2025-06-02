@@ -4,7 +4,8 @@ FROM fedora:30
 
 RUN yum update -y && \
     yum -y install httpd php php-cli php-common && \
-    yum clean all
+    yum clean all && \
+    rm -rf /var/cache/yum/*
 
 RUN dnf update -y && \
     dnf -y install httpd php php-cli php-common && \

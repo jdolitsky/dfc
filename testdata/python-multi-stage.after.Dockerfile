@@ -5,8 +5,7 @@
 FROM cgr.dev/ORG/chainguard-base:latest AS builder-image
 USER root
 
-RUN apk add --no-cache build-base py3-pip py3-wheel python3.9 python3.9-dev python3.9-venv && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache build-base py3-pip py3-wheel python3.9 python3.9-dev python3.9-venv
 
 # create and activate virtual environment
 RUN python3.9 -m venv /opt/venv
@@ -18,8 +17,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 FROM cgr.dev/ORG/chainguard-base:latest AS runner-image
 USER root
-RUN apk add --no-cache python3-venv python3.9 && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache python3-venv python3.9
 
 COPY --from=builder-image /opt/venv /opt/venv
 

@@ -37,6 +37,12 @@ const (
 	ManagerApt      Manager = "apt"
 )
 
+// Package manager Commands
+const (
+	CommandAddAptRepository = "add-apt-repository"
+	CommandAptAddRepository = "apt-add-repository"
+)
+
 // User management commands and packages
 const (
 	CommandUserAdd  = "useradd"
@@ -77,20 +83,31 @@ const (
 
 // PackageManagerInfo holds metadata about a package manager
 type PackageManagerInfo struct {
-	Distro         Distro
-	InstallKeyword string
+	Distro             Distro
+	InstallKeyword     string
+	AssociatedCommands []string
 }
 
 // PackageManagerInfoMap maps package managers to their metadata
 var PackageManagerInfoMap = map[Manager]PackageManagerInfo{
-	ManagerAptGet: {Distro: DistroDebian, InstallKeyword: SubcommandInstall},
-	ManagerApt:    {Distro: DistroDebian, InstallKeyword: SubcommandInstall},
+	ManagerAptGet: {Distro: DistroDebian, InstallKeyword: SubcommandInstall, AssociatedCommands: []string{CommandAddAptRepository, CommandAptAddRepository}},
+	ManagerApt:    {Distro: DistroDebian, InstallKeyword: SubcommandInstall, AssociatedCommands: []string{CommandAddAptRepository, CommandAptAddRepository}},
 
 	ManagerYum:      {Distro: DistroFedora, InstallKeyword: SubcommandInstall},
 	ManagerDnf:      {Distro: DistroFedora, InstallKeyword: SubcommandInstall},
 	ManagerMicrodnf: {Distro: DistroFedora, InstallKeyword: SubcommandInstall},
 
 	ManagerApk: {Distro: DistroAlpine, InstallKeyword: SubcommandAdd},
+}
+
+type PackageSpec struct {
+	Manager        Manager
+	Name           string
+	Tag            string
+	VersionMatcher string
+	Version        string
+	Release        string
+	Epoch          string
 }
 
 // DockerfileLine represents a single line in a Dockerfile
@@ -430,6 +447,24 @@ type PackageMap map[Distro]map[string][]string
 //	})
 type FromLineConverter func(from *FromDetails, converted string, stageHasRun bool) (string, error)
 
+// RunLineConverter is a function type for custom RUN line conversion.
+// It takes a RunDetails struct (parsed info about the RUN line), the string that would be produced by the default conversion,
+// and the build stage number. It returns the string to use for the RUN line, or an error to fall back to the default.
+//
+// Example usage:
+//
+//	myRunConverter := func(run *RunDetails, converted string, stage int) (string, error) {
+//	    if run.Manager == "apt-get" {
+//	        return "RUN echo 'apt-get is not allowed!'", nil
+//	    }
+//	    return converted, nil
+//	}
+//
+//	dockerFile.Convert(ctx, dfc.Options{
+//	    RunLineConverter: myRunConverter,
+//	})
+type RunLineConverter func(run *RunDetails, converted string, stage int) (string, error)
+
 // Options defines the configuration options for the conversion
 type Options struct {
 	Organization      string
@@ -438,6 +473,8 @@ type Options struct {
 	Update            bool              // When true, update cached mappings before conversion
 	NoBuiltIn         bool              // When true, don't use built-in mappings, only ExtraMappings
 	FromLineConverter FromLineConverter // Optional custom converter for FROM lines
+	RunLineConverter  RunLineConverter  // Optional custom converter for RUN lines
+	Strict            bool              // When true, fail if any package is unknown
 }
 
 // MappingsConfig represents the structure of builtin-mappings.yaml
@@ -529,6 +566,7 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 					Registry:          opts.Registry,
 					ExtraMappings:     mappings,
 					FromLineConverter: opts.FromLineConverter,
+					RunLineConverter:  opts.RunLineConverter,
 				}
 				newLine.Converted = convertFromLine(line.From, line.Stage, stagesWithRunCommands, optsWithMappings)
 			}
@@ -542,6 +580,7 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 				Registry:          opts.Registry,
 				ExtraMappings:     mappings,
 				FromLineConverter: opts.FromLineConverter,
+				RunLineConverter:  opts.RunLineConverter,
 			}
 			argLine, argDetails := convertArgLine(line.Arg, d.Lines, stagesWithRunCommands, optsWithMappings)
 			newLine.Converted = argLine
@@ -550,7 +589,10 @@ func (d *Dockerfile) Convert(ctx context.Context, opts Options) (*Dockerfile, er
 
 		// Process RUN commands
 		if line.Run != nil && line.Run.Shell != nil && line.Run.Shell.Before != nil {
-			processRunLine(newLine, line, stagePackages, mappings.Packages)
+			err := processRunLineWithConverter(newLine, line, stagePackages, mappings.Packages, opts.RunLineConverter, opts.Strict)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		// Add the converted line to the result
@@ -914,8 +956,8 @@ func buildImageReference(baseFilename string, tag string, opts Options) string {
 	return newBase
 }
 
-// processRunLine handles the conversion of RUN lines
-func processRunLine(newLine *DockerfileLine, line *DockerfileLine, stagePackages map[int][]string, packageMap PackageMap) {
+// processRunLineWithConverter handles the conversion of RUN lines but supports a RunLineConverter.
+func processRunLineWithConverter(newLine *DockerfileLine, line *DockerfileLine, stagePackages map[int][]string, packageMap PackageMap, runLineConverter RunLineConverter, strict bool) error {
 	beforeShell := line.Run.Shell.Before
 
 	// Initialize RunDetails with Before shell
@@ -926,8 +968,11 @@ func processRunLine(newLine *DockerfileLine, line *DockerfileLine, stagePackages
 	}
 
 	// First check for package manager commands
-	modifiedPMCommands, distro, manager, packages, mappedPackages, afterShell :=
-		convertPackageManagerCommands(beforeShell, packageMap)
+	modifiedPMCommands, distro, manager, packages, mappedPackages, afterShell, err :=
+		convertPackageManagerCommands(beforeShell, packageMap, strict)
+	if err != nil {
+		return err
+	}
 	newLine.Run.Distro = distro
 	newLine.Run.Manager = manager
 	newLine.Run.Packages = packages
@@ -958,15 +1003,27 @@ func processRunLine(newLine *DockerfileLine, line *DockerfileLine, stagePackages
 		runPrefix := DirectiveRun + " "
 		runIndex := strings.Index(upperRawLine, runPrefix)
 
+		var defaultConverted string
 		if runIndex != -1 {
 			// Get the original case of the RUN directive
 			originalRunDirective := rawLine[runIndex : runIndex+len(runPrefix)]
-			newLine.Converted = originalRunDirective + afterShell.String()
+			defaultConverted = originalRunDirective + afterShell.String()
 		} else {
 			// Fallback if we can't find the directive (shouldn't happen)
-			newLine.Converted = DirectiveRun + " " + afterShell.String()
+			defaultConverted = DirectiveRun + " " + afterShell.String()
+		}
+
+		if runLineConverter != nil {
+			custom, err := runLineConverter(newLine.Run, defaultConverted, line.Stage)
+			if err != nil {
+				return err
+			}
+			newLine.Converted = custom
+		} else {
+			newLine.Converted = defaultConverted
 		}
 	}
+	return nil
 }
 
 // addUserRootDirectives adds USER root directives where needed
@@ -1073,9 +1130,9 @@ func convertImageTag(tag string, _ bool) string {
 
 // convertPackageManagerCommands converts package manager commands in a shell command
 // to the Alpine equivalent (apk add)
-func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (bool, Distro, Manager, []string, []string, *ShellCommand) {
+func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap, strict bool) (bool, Distro, Manager, []string, []string, *ShellCommand, error) {
 	if shell == nil {
-		return false, "", "", nil, nil, nil
+		return false, "", "", nil, nil, nil, nil
 	}
 
 	// Determine which distro/package manager we're going to focus on
@@ -1123,12 +1180,12 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 					for _, arg := range part.Args[installKeywordIndex+1:] {
 						if !strings.HasPrefix(arg, "-") {
 							packagesDetected = append(packagesDetected, arg)
-
-							if distroMap, exists := packageMap[distro]; exists && distroMap[arg] != nil {
-								packagesToInstall = append(packagesToInstall, distroMap[arg]...)
-							} else {
-								packagesToInstall = append(packagesToInstall, arg)
+							packageSpec := parsePackageSpec(firstPM, arg)
+							packages, err := convertPackage(packageSpec, distro, packageMap, strict)
+							if err != nil {
+								return false, "", "", nil, nil, nil, err
 							}
+							packagesToInstall = append(packagesToInstall, packages...)
 						}
 					}
 				}
@@ -1141,7 +1198,7 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 
 	// If we don't have any package manager commands, return the original shell
 	if !hasPackageManager {
-		return false, distro, firstPM, nil, nil, shell
+		return false, distro, firstPM, nil, nil, shell, nil
 	}
 
 	// Sort and deduplicate packages
@@ -1175,7 +1232,7 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 					Args:    append([]string{SubcommandAdd, ApkNoCacheFlag}, packagesToInstall...),
 				},
 			},
-		}
+		}, nil
 	}
 
 	// If we only have package manager commands but no packages to install,
@@ -1187,7 +1244,7 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 					Command: "true",
 				},
 			},
-		}
+		}, nil
 	}
 
 	// Create a new shell command with parts
@@ -1201,6 +1258,8 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 		Command: string(ManagerApk),
 		Args:    append([]string{SubcommandAdd, ApkNoCacheFlag}, packagesToInstall...),
 	}
+
+	firstPMInfo := PackageManagerInfoMap[firstPM]
 
 	// Process parts in the original order
 	for i, part := range shell.Parts {
@@ -1218,8 +1277,8 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 				apkAdded = true
 			}
 			// Skip this package manager command (don't add it to newParts)
-		} else {
-			// This is not a package manager command, keep it
+		} else if !slices.Contains(firstPMInfo.AssociatedCommands, part.Command) && !isPackageManagerCleanupCommand(part) {
+			// This is not a package manager command or associated command, keep it
 			newPart := cloneShellPart(part)
 			newParts = append(newParts, newPart)
 		}
@@ -1253,7 +1312,7 @@ func convertPackageManagerCommands(shell *ShellCommand, packageMap PackageMap) (
 		})
 	}
 
-	return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{Parts: newParts}
+	return true, distro, firstPM, packagesDetected, packagesToInstall, &ShellCommand{Parts: newParts}, nil
 }
 
 // Helper function to clone a shell part
@@ -1406,4 +1465,111 @@ func normalizeImageName(imageRef string) string {
 	}
 
 	return imageRef
+}
+
+var packageManagerRemoveCacheArgs = [][]string{
+	{"-rf", "/var/lib/apt/lists/*"},
+	{"-rf", "/var/cache/yum/*"},
+}
+
+// isPackageManagerCleanupCommand checks if the shell command is a known package manager cleanup command.
+func isPackageManagerCleanupCommand(part *ShellPart) bool {
+	if part.Command == "rm" {
+		for _, args := range packageManagerRemoveCacheArgs {
+			if slices.Equal(part.Args, args) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var ApkVersionMatchers = []string{"~=", "=~", "~", "=", ">", "<"}
+
+// parseApkVersion splits the apk package string by version matcher
+func parseApkVersion(pkg string) (before string, after string, matcher string) {
+	for _, m := range ApkVersionMatchers {
+		if b, a, found := strings.Cut(pkg, m); found {
+			return b, a, m
+		}
+	}
+	return pkg, "", ""
+}
+
+// parsePackageSpec parses package manager argument.
+func parsePackageSpec(manager Manager, packageArg string) (spec PackageSpec) {
+	spec.Manager = manager
+	switch manager {
+	case ManagerApk:
+		// https://wiki.alpinelinux.org/wiki/Alpine_Package_Keeper#Add_a_Package
+		// name{@tag}{[<>~=]version}
+		spec.Name, spec.Tag, _ = strings.Cut(packageArg, "@")
+		if spec.Tag == "" {
+			spec.Name, spec.Version, spec.VersionMatcher = parseApkVersion(spec.Name)
+		} else {
+			spec.Tag, spec.Version, spec.VersionMatcher = parseApkVersion(spec.Tag)
+		}
+		spec.Version, spec.Release, _ = strings.Cut(spec.Version, "-")
+	case ManagerApt, ManagerAptGet:
+		// https://www.debian.org/doc/debian-policy/ch-controlfields.html#version
+		// name=[epoch:]upstream_version[-debian_revision]
+		spec.Name, spec.Version, _ = strings.Cut(packageArg, "=")
+		if spec.Version != "" {
+			spec.VersionMatcher = "="
+			if strings.Contains(spec.Version, ":") {
+				spec.Epoch, spec.Version, _ = strings.Cut(spec.Version, ":")
+			}
+
+			// hyphens only allowed in version if there is a revision
+			if lastHyphenIndex := strings.LastIndex(spec.Version, "-"); lastHyphenIndex != -1 {
+				spec.Release = spec.Version[lastHyphenIndex+1:]
+				spec.Version = spec.Version[:lastHyphenIndex]
+			}
+		}
+	case ManagerDnf, ManagerMicrodnf, ManagerYum:
+		// Format is name-version-release
+		// But the problem is the name can also have `-` so not sure
+		// if there is a reliable way to parse out the parts. Punt for now.
+		fallthrough
+	default:
+		spec.Name = packageArg
+	}
+
+	return spec
+}
+
+// convertPackage performs a lookup of a given package in the package map and returns a valid apk package parameter.
+func convertPackage(spec PackageSpec, distro Distro, packageMap PackageMap, strict bool) ([]string, error) {
+	var packages []string
+	if distroMap, exists := packageMap[distro]; exists && distroMap[spec.Name] != nil {
+		for _, pkg := range distroMap[spec.Name] {
+			packages = append(packages, createApkPackageSpec(pkg, spec))
+		}
+	} else if strict {
+		return nil, fmt.Errorf("%s has no mapping", spec.Name)
+	} else {
+		packages = append(packages, createApkPackageSpec(spec.Name, spec))
+	}
+	return packages, nil
+}
+
+// createApkPackageSpec formats an apk package parameter. The following adjustments will be made to align with
+// chainguard best practices:
+// - Drop release specifier
+// - Force fuzzy matching (= -> =~)
+func createApkPackageSpec(name string, spec PackageSpec) string {
+	pkg := name
+	if spec.Tag != "" {
+		pkg += "@" + spec.Tag
+	}
+
+	if spec.Version != "" {
+		matcher := spec.VersionMatcher
+		if spec.Manager != ManagerApk || matcher == "=" {
+			matcher = "=~"
+		}
+		pkg += matcher + spec.Version
+	}
+
+	return pkg
 }

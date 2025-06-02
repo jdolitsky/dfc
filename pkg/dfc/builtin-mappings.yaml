@@ -147,6 +147,10 @@ packages:
             - aws-cli
         build-essential:
             - build-base
+        fonts-liberation:
+            - font-liberation
+        fonts-open-sans:
+            - font-opensans
         fuse:
             - fuse2
             - fuse-common
@@ -166,6 +170,10 @@ packages:
             - glibc-dev
         libc6-dev:
             - glibc-dev
+        libcairo2:
+            - cairo
+        libcups2:
+            - cups-libs
         libcurl4-openssl-dev:
             - curl-dev
         libgssapi-krb5-2:
@@ -234,10 +242,15 @@ packages:
         ssh:
             - openssh-client
             - openssh-server
+        software-properties-common: []
         uuid-runtime:
             - util-linux-misc
         watch:
             - procps
+        xfonts-utils:
+            - font-util
+            - mkfontscale
+            - bdftopcf
         xz-utils:
             - xz
         zlib1g-dev:
