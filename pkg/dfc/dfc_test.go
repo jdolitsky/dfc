@@ -2257,3 +2257,126 @@ func TestCreateApkPackageSpec(t *testing.T) {
 		})
 	}
 }
+
+func TestPlatformFlagParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected *FromDetails
+	}{
+		{
+			name:  "platform with equals",
+			input: `FROM --platform=linux/amd64 golang:1.23.8-bookworm AS build`,
+			expected: &FromDetails{
+				Base:     "golang",
+				Tag:      "1.23.8-bookworm",
+				Alias:    "build",
+				Orig:     "golang:1.23.8-bookworm",
+				Platform: "linux/amd64",
+			},
+		},
+		{
+			name:  "platform with space",
+			input: `FROM --platform linux/arm64 ubuntu:latest`,
+			expected: &FromDetails{
+				Base:     "ubuntu",
+				Tag:      "latest",
+				Orig:     "ubuntu:latest",
+				Platform: "linux/arm64",
+			},
+		},
+		{
+			name:  "platform with variable",
+			input: `FROM --platform=$ARCH nodejs:18`,
+			expected: &FromDetails{
+				Base:     "nodejs",
+				Tag:      "18",
+				Orig:     "nodejs:18",
+				Platform: "$ARCH",
+			},
+		},
+		{
+			name:  "platform with partial variable",
+			input: `FROM --platform linux/$ARCH ubuntu:latest`,
+			expected: &FromDetails{
+				Base:     "ubuntu",
+				Tag:      "latest",
+				Orig:     "ubuntu:latest",
+				Platform: "linux/$ARCH",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dockerfile, err := ParseDockerfile(context.Background(), []byte(tt.input))
+			if err != nil {
+				t.Fatalf("ParseDockerfile failed: %v", err)
+			}
+
+			if len(dockerfile.Lines) != 1 {
+				t.Fatalf("Expected 1 line, got %d", len(dockerfile.Lines))
+			}
+
+			line := dockerfile.Lines[0]
+			if line.From == nil {
+				t.Fatalf("Expected FROM details, got nil")
+			}
+
+			if diff := cmp.Diff(tt.expected, line.From); diff != "" {
+				t.Errorf("FROM details mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPlatformFlagPreservedInConversion(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		expectedOutput string
+	}{
+		{
+			name:           "platform with equals preserved",
+			input:          `FROM --platform=linux/amd64 golang:1.23.8-bookworm AS build`,
+			expectedOutput: `FROM --platform=linux/amd64 cgr.dev/ORG/go:1.23-dev AS build`,
+		},
+		{
+			name:           "platform with space preserved",
+			input:          `FROM --platform linux/arm64 ubuntu:latest`,
+			expectedOutput: `FROM --platform=linux/arm64 cgr.dev/ORG/chainguard-base:latest`,
+		},
+		{
+			name:           "platform with variable preserved",
+			input:          `FROM --platform=$ARCH nodejs:18`,
+			expectedOutput: `FROM --platform=$ARCH cgr.dev/ORG/node:18-dev`,
+		},
+		{
+			name:           "platform with partial variable preserved",
+			input:          `FROM --platform linux/$ARCH ubuntu:latest`,
+			expectedOutput: `FROM --platform=linux/$ARCH cgr.dev/ORG/chainguard-base:latest`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Parse the Dockerfile
+			dockerfile, err := ParseDockerfile(context.Background(), []byte(tt.input+"\nRUN echo hello"))
+			if err != nil {
+				t.Fatalf("ParseDockerfile failed: %v", err)
+			}
+
+			// Convert it
+			converted, err := dockerfile.Convert(context.Background(), Options{})
+			if err != nil {
+				t.Fatalf("Convert failed: %v", err)
+			}
+
+			// Check that the platform flag is preserved
+			result := converted.String()
+			if !strings.Contains(result, tt.expectedOutput) {
+				t.Errorf("Expected output to contain:\n%s\nActual output:\n%s", tt.expectedOutput, result)
+			}
+		})
+	}
+}
