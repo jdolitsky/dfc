@@ -1,8 +1,8 @@
-# DFC MCP Server
+# dfc MCP Server
 
-This is a Go implementation of an MCP (Model Context Protocol) server for the Dockerfile Converter (DFC) utility. It provides a standardized interface that allows AI assistants and other clients to convert Dockerfiles to use Chainguard Images and APKs through the stdio protocol.
+This is a Go implementation of an MCP (Model Context Protocol) server for `dfc`. It provides a standardized interface that allows AI assistants and other clients to convert Dockerfiles to use Chainguard Images and APKs through the stdio protocol.
 
-![DFC MCP Server](demo-cursor.png)
+![dfc MCP Server](demo-cursor.png)
 
 ## Features
 
@@ -28,9 +28,7 @@ This MCP server provides the following tools:
 ├── go.mod/go.sum     # Go module dependencies
 ├── Dockerfile        # Container definition
 ├── README.md         # Documentation
-├── start.sh          # Convenience script to start the server
-├── mcp-server-go     # Built binary
-└── test/             # Testing utilities (optional)
+├── mcp-server        # Built binary
 ```
 
 ## Prerequisites
@@ -49,7 +47,7 @@ cd dfc/mcp-server
 Build the server:
 
 ```bash
-go build -o mcp-server
+go build -o mcp-server .
 ```
 
 Run the server:
@@ -68,6 +66,20 @@ docker run -p 3000:3000 dfc-mcp-server
 ```
 
 ## Configuring with AI Assistants
+
+### Configuring in Claude Code
+
+To use this server with Claude Code, run the following:
+
+```
+claude mcp add dfc -- /path/to/dfc/mcp-server/mcp-server
+```
+
+Then you can invoke the server by asking to convert a Dockerfile:
+
+```
+Can you convert the following Dockerfile to use Chainguard Images? https://raw.githubusercontent.com/django/djangoproject.com/refs/heads/main/Dockerfile
+```
 
 ### Configuring in Cursor
 
@@ -121,7 +133,7 @@ To add this MCP server to Windsurf, follow these steps:
 3. Click "Add New Server"
 4. Fill in the following details:
    - Name: `Dockerfile Converter`
-   - Command: `/path/to/dfc/mcp-server-go/mcp-server-go`
+   - Command: `/path/to/dfc/mcp-server/mcp-server`
    - Transport Type: `stdio`
 5. Click "Save"
 
@@ -135,7 +147,7 @@ You can then invoke the tool in Windsurf using:
 
 For other MCP clients or custom implementations, you'll need:
 
-1. The path to the built `mcp-server-go` executable
+1. The path to the built `mcp-server` executable
 2. Configuration for stdio transport
 3. Tool names to invoke:
    - `convert_dockerfile`
@@ -148,7 +160,7 @@ General configuration format for most MCP clients:
 {
   "servers": {
     "dfc": {
-      "command": "/path/to/dfc/mcp-server-go/mcp-server-go",
+      "command": "/path/to/dfc/mcp-server/mcp-server",
       "transport": "stdio"
     }
   }
