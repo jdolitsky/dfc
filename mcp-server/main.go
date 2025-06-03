@@ -22,13 +22,13 @@ import (
 
 // Version information
 const (
-	Version = "1.0.0"
+	Version = "dev"
 )
 
 func main() {
 	// Set up logging to stderr for diagnostics
 	logger := log.New(os.Stderr, "[dfc-mcp] ", log.LstdFlags)
-	logger.Printf("Starting DFC MCP Server v%s", Version)
+	logger.Printf("Starting dfc MCP Server v%s", Version)
 
 	// Create a context that listens for termination signals
 	_, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -36,7 +36,7 @@ func main() {
 
 	// Create an MCP server instance
 	s := server.NewMCPServer(
-		"DFC - Dockerfile Converter",
+		"dfc - Dockerfile Converter",
 		Version,
 		server.WithLogging(),
 		server.WithRecovery(),
@@ -60,7 +60,7 @@ func main() {
 
 	// Add a healthcheck tool for diagnostics
 	healthcheckTool := mcp.NewTool("healthcheck",
-		mcp.WithDescription("Check if the DFC MCP server is running correctly"),
+		mcp.WithDescription("Check if the dfc MCP server is running correctly"),
 	)
 
 	// Add the handler for the Dockerfile converter tool
@@ -184,13 +184,14 @@ func main() {
 		}
 
 		// Build package manager list
+		// TODO: something seems to be off here, returning "No package managers detected"
 		packageManagerList := []string{}
 		for pm := range packageManagers {
 			packageManagerList = append(packageManagerList, pm)
 		}
 
 		// Build analysis text
-		analysis := fmt.Sprintf("Dockerfile Analysis:\n\n")
+		analysis := "Dockerfile Analysis:\n\n"
 		analysis += fmt.Sprintf("- Total stages: %d\n", stageCount)
 		analysis += fmt.Sprintf("- Base images: %s\n", strings.Join(baseImages, ", "))
 		if len(packageManagerList) > 0 {
