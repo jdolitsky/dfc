@@ -2172,7 +2172,8 @@ func TestConvertPackage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := convertPackage(tt.args.spec, tt.args.distro, pm, false)
+			ctx := context.Background()
+			got, err := convertPackage(ctx, tt.args.spec, tt.args.distro, pm, false, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2376,6 +2377,61 @@ func TestPlatformFlagPreservedInConversion(t *testing.T) {
 			result := converted.String()
 			if !strings.Contains(result, tt.expectedOutput) {
 				t.Errorf("Expected output to contain:\n%s\nActual output:\n%s", tt.expectedOutput, result)
+			}
+		})
+	}
+}
+
+func TestWarnMissingPackages(t *testing.T) {
+	convertTests := []struct {
+		name                string
+		raw                 string
+		warnMissingPackages bool
+		expectWarning       bool
+	}{
+		{
+			name:                "missing package with warning enabled",
+			raw:                 "RUN apt-get install -y nonexistentpackage",
+			warnMissingPackages: true,
+			expectWarning:       true,
+		},
+		{
+			name:                "missing package with warning disabled",
+			raw:                 "RUN apt-get install -y nonexistentpackage",
+			warnMissingPackages: false,
+			expectWarning:       false,
+		},
+		{
+			name:                "existing package with warning enabled",
+			raw:                 "RUN apt-get install -y awscli",
+			warnMissingPackages: true,
+			expectWarning:       false,
+		},
+	}
+	for _, tt := range convertTests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			parsed, err := ParseDockerfile(ctx, []byte(tt.raw))
+			if err != nil {
+				t.Fatalf("Failed to parse Dockerfile: %v", err)
+			}
+
+			testMappings := MappingsConfig{
+				Packages: PackageMap{
+					DistroDebian: {
+						"awscli": []string{"aws-cli"},
+					},
+				},
+			}
+
+			_, convertErr := parsed.Convert(ctx, Options{
+				WarnMissingPackages: tt.warnMissingPackages,
+				ExtraMappings:       testMappings,
+				NoBuiltIn:           true,
+			})
+
+			if convertErr != nil {
+				t.Errorf("Convert failed: %v", convertErr)
 			}
 		})
 	}
