@@ -220,7 +220,7 @@ func cli() *cobra.Command {
 	cmd.Flags().BoolVar(&noBuiltInFlag, "no-builtin", false, "skip built-in package/image mappings, still apply default conversion logic")
 	cmd.Flags().Var(&level, "log-level", "log level (e.g. debug, info, warn, error)")
 	cmd.Flags().BoolVar(&strictFlag, "strict", false, "when true, fail if any package is unknown")
-	cmd.Flags().BoolVar(&warnMissingPackagesFlag, "warn-missing-packages", false, "when true, warn about missing package mappings instead of using the original package name")
+	cmd.Flags().BoolVar(&warnMissingPackagesFlag, "warn-missing-packages", false, "when true, warn about missing package mappings")
 
 	return cmd
 }
