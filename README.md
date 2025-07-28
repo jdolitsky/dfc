@@ -1,4 +1,4 @@
-# dfc
+# DFC
 
 <p align="center">
 <img align="center" alt="dfc" width="250" src="./dfc.png">
@@ -14,7 +14,7 @@
 ---
 ## About
 
-The `dfc` tool helps you migrate your Dockerfiles to use Chainguard Images. For comprehensive guides on migration, check out:
+The `dfc` tool (DFC) helps you migrate your Dockerfiles to use Chainguard Images. For comprehensive guides on migration, check out:
 - [Dockerfile Conversion Guide](https://edu.chainguard.dev/chainguard/migration/dockerfile-conversion/)
 - [Chainguard Migration Overview](https://edu.chainguard.dev/chainguard/migration/migrations-overview/)
 
