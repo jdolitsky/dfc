@@ -32,6 +32,12 @@ You can also install `dfc` from source:
 go install github.com/chainguard-dev/dfc@latest
 ```
 
+If that does not work, make sure the PATH environment variable is properly set:
+
+```sh
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
 You can also use the `dfc` container image (from Docker Hub or `cgr.dev`):
 
 ```sh
